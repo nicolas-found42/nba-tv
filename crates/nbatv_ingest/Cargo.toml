@@ -1,0 +1,7 @@
+[package]
+name = "nbatv_ingest"
+version = "0.1.0"
+edition = "2021"
+description = "Bootstrap ingest for the nba-tv personal NBA archive (FTE CSV, validators, snapshot paths)"
+[lints]
+workspace = true

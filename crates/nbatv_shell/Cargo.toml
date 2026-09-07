@@ -1,0 +1,11 @@
+[package]
+name = "nbatv_shell"
+version = "0.1.0"
+edition = "2021"
+description = "Shell: app window and all browse screens (Home, Season dashboard, Team ledgers, Game view)"
+license = "MIT"
+
+[dependencies]
+eframe = "0.32"
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nbatv_db",
+    "crates/nbatv_ingest",
+    "crates/nbatv_shell",
+    "crates/nbatv_player",
+    "crates/nbatv_ladder",
+]
+
+# Virtual manifest: no [package] here, so there is no binary to run and
+# `default-run` is unset (no flagship binary yet).
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+
+[workspace.lints.rust]
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = "warn"

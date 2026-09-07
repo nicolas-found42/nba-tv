@@ -1,0 +1,19 @@
+# Build output
+target/
+
+# Local ingest snapshots (raw HTML/JSON kept so re-normalization never re-fetches)
+data/raw/
+
+# Never commit media
+*.mp4
+*.mkv
+
+# Never commit secrets
+.env
+*.pem
+*.key
+
+# Editor / IDE
+.vscode/
+.idea/
+.DS_Store
