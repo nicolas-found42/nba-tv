@@ -447,7 +447,7 @@ mod tests {
                 ]);
                 (16u64, large)
             } else {
-                (8u64, size32 as u64)
+                (8u64, size32)
             };
             if size == 0 {
                 // Extends to EOF: record a trailing mdat tag, then stop.
@@ -493,70 +493,84 @@ mod tests {
     /// when ffmpeg is absent. Synthetic media in a temp dir only.
     #[test]
     fn normalize_round_trip_writes_moov_first() {
-        if std::process::Command::new("ffmpeg")
+        if !std::process::Command::new("ffmpeg")
             .arg("-version")
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
-            == false
         {
             println!("SKIP normalize_round_trip_writes_moov_first: ffmpeg not installed");
             return;
         }
-        let dir = std::env::temp_dir().join(format!("nbatv-norm-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch temp dir");
-        let result = (|| {
-            let src = dir.join("src.mp4");
-            let status = std::process::Command::new("ffmpeg")
-                .args([
-                    "-y",
-                    "-v",
-                    "error",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "testsrc=duration=1:size=32x32:rate=5",
-                    "-c:v",
-                    "libx264",
-                    "-pix_fmt",
-                    "yuv420p",
-                ])
-                .arg(&src)
-                .status()
-                .expect("spawn ffmpeg to synthesize fixture");
-            assert!(status.success(), "fixture synthesis must succeed");
-            let out = dir.join("norm.mp4");
-            let args = normalize_args(
-                &src.to_string_lossy().into_owned(),
-                &out.to_string_lossy().into_owned(),
-            );
-            assert!(args.iter().any(|a| a == "+faststart"));
-            // Builders emit argument vectors only (no binary prefix);
-            // spawning is the caller's job.
-            let status = std::process::Command::new("ffmpeg")
-                .args(["-y", "-v", "error"])
-                .args(&args)
-                .status()
-                .expect("spawn ffmpeg normalizer");
-            let bytes = std::fs::read(&out).expect("normalized output exists");
-            let (moov, mdat) = top_level_offsets(&bytes);
-            assert!(
-                moov.is_some() && mdat.is_some(),
-                "normalized MP4 must contain moov + mdat, got {moov:?}/{mdat:?}"
-            );
-            assert!(
-                is_moov_first(moov, mdat),
-                "+faststart must place moov before mdat, got {moov:?}/{mdat:?}"
-            );
-            let readiness = Mp4RangeReadiness {
-                moov_first: is_moov_first(moov, mdat),
-                accepts_range: supports_range(Some("bytes")),
-            };
-            assert!(readiness.is_progressive_ready());
-        })();
-        let _ = std::fs::remove_dir_all(&dir);
-        result
+        let dir = NormTempDir::create();
+        let src = dir.path().join("src.mp4");
+        let synth = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=1:size=32x32:rate=5",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&src)
+            .status()
+            .expect("spawn ffmpeg to synthesize fixture");
+        assert!(synth.success(), "fixture synthesis must succeed");
+        let out = dir.path().join("norm.mp4");
+        let args = normalize_args(&src.to_string_lossy(), &out.to_string_lossy());
+        assert!(args.iter().any(|a| a == "+faststart"));
+        // Builders emit argument vectors only (no binary prefix);
+        // spawning is the caller's job.
+        let normalized = std::process::Command::new("ffmpeg")
+            .args(["-y", "-v", "error"])
+            .args(&args)
+            .status()
+            .expect("spawn ffmpeg normalizer");
+        assert!(normalized.success(), "normalize must succeed: {args:?}");
+        let bytes = std::fs::read(&out).expect("normalized output exists");
+        let (moov, mdat) = top_level_offsets(&bytes);
+        assert!(
+            moov.is_some() && mdat.is_some(),
+            "normalized MP4 must contain moov + mdat, got {moov:?}/{mdat:?}"
+        );
+        assert!(
+            is_moov_first(moov, mdat),
+            "+faststart must place moov before mdat, got {moov:?}/{mdat:?}"
+        );
+        let readiness = Mp4RangeReadiness {
+            moov_first: is_moov_first(moov, mdat),
+            accepts_range: supports_range(Some("bytes")),
+        };
+        assert!(readiness.is_progressive_ready());
+    }
+
+    /// Unique scratch dir under the system temp dir, removed on drop —
+    /// panics still clean up (same pattern as `pump::tests::TempDir`).
+    struct NormTempDir(std::path::PathBuf);
+
+    impl NormTempDir {
+        fn create() -> Self {
+            let dir = std::env::temp_dir().join(format!("nbatv-norm-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch temp dir");
+            NormTempDir(dir)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for NormTempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     /// Presence probe only: passes whether or not ffmpeg is installed.
