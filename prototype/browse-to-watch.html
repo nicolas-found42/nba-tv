@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROTOTYPE — Archive browse-to-watch flow (throwaway)</title>
+<!--
+  PROTOTYPE — throwaway, not production. Answers ticket #6:
+  "Three variants of the browse-to-watch flow (Team → Season → Schedule → Game → Box Score + Game Tape),
+   switchable via ?variant=, as a single double-click HTML file standing in for the egui Shell."
+  No persistence. State lives in memory. Domain language follows repo CONTEXT.md.
+  Variants: A = BR-native archival browser · B = Faceted search + spotlight · C = TimeSlice era board.
+  Pattern sources: Basketball-Reference breadcrumbs+month tables · Jellyfin shelves/badges/hover previews ·
+  Algolia facet trays with counts · TimeSlice faceted timelines · Strava self-hosted coverage boards ·
+  egui SidePanel rails (collapsible icon rail) + kittest-headless note.
+-->
+<style>
+  :root { --accent:#1d4ed8; --ink:#111827; --mut:#6b7280; --line:#e5e7eb; --bg:#f8fafc; --card:#ffffff; --warn:#92400e; --warnbg:#fef3c7; --ok:#065f46; --okbg:#d1fae5; --bad:#991b1b; --badbg:#fee2e2; }
+  * { box-sizing:border-box; }
+  body { font-family:-apple-system, "SF Pro Text", Inter, Helvetica, Arial, sans-serif; color:var(--ink); background:var(--bg); margin:0; padding:0 0 90px 0; }
+  .proto-banner { background:#111827; color:#f9fafc; padding:10px 16px; font-size:13px; }
+  .proto-banner b { color:#fbbf24; }
+  header.page { padding:18px 20px 6px 20px; max-width:1180px; margin:0 auto; }
+  header.page h1 { font-size:20px; margin:0 0 4px 0; }
+  header.page p { margin:4px 0; color:var(--mut); font-size:14px; max-width:80ch; }
+  .glossary { font-size:12.5px; color:var(--mut); }
+  .patterns { font-size:12.5px; color:var(--mut); border-left:3px solid var(--accent); padding-left:10px; }
+  main { max-width:1180px; margin:0 auto; padding:10px 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .grid2 { display:grid; grid-template-columns:300px 1fr; gap:14px; }
+  .grid3 { display:grid; grid-template-columns:240px 1fr 320px; gap:14px; }
+  @media (max-width:900px){ .grid2,.grid3{ grid-template-columns:1fr; } }
+  h2 { font-size:15px; margin:0 0 8px 0; }
+  h3 { font-size:13px; margin:12px 0 6px 0; color:var(--mut); text-transform:uppercase; letter-spacing:.04em; }
+  button, select, input { font:inherit; }
+  button { border:1px solid var(--line); background:#fff; border-radius:8px; padding:7px 10px; cursor:pointer; font-size:13.5px; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button:disabled { opacity:.45; cursor:default; }
+  .list { display:flex; flex-direction:column; gap:6px; max-height:420px; overflow:auto; }
+  .row { border:1px solid var(--line); border-radius:8px; padding:8px 10px; background:#fff; cursor:pointer; text-align:left; width:100%; }
+  .row[aria-current="true"] { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
+  .row .sub { color:var(--mut); font-size:12.5px; }
+  .pill { display:inline-block; font-size:12px; border-radius:999px; padding:2px 9px; border:1px solid var(--line); background:#f3f4f6; }
+  .pill.ok { background:var(--okbg); color:var(--ok); border-color:#a7f3d0; }
+  .pill.warn { background:var(--warnbg); color:var(--warn); border-color:#fde68a; }
+  .pill.bad { background:var(--badbg); color:var(--bad); border-color:#fecaca; }
+  .chip { display:inline-block; font-size:11px; border-radius:4px; padding:1px 6px; background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; margin:1px 2px; }
+  .state { font-size:13px; background:#0f172a; color:#e2e8f0; border-radius:10px; padding:12px 14px; white-space:pre-wrap; font-family:ui-monospace, Menlo, monospace; }
+  table.box { border-collapse:collapse; width:100%; font-size:13px; }
+  table.box th, table.box td { border-bottom:1px solid var(--line); padding:6px 8px; text-align:right; }
+  table.box th:first-child, table.box td:first-child { text-align:left; }
+  .tape { border-left:4px solid var(--accent); padding:10px 12px; background:#eff6ff; border-radius:0 8px 8px 0; font-size:13.5px; }
+  .tape.missing { border-color:var(--bad); background:#fef2f2; }
+  .tape.external { border-color:var(--warn); background:#fffbeb; }
+  .scenarios { display:flex; flex-wrap:wrap; gap:8px; margin:8px 0; }
+  .muted { color:var(--mut); font-size:13px; }
+  .ladder { font-size:12.5px; width:100%; border-collapse:collapse; }
+  .ladder td, .ladder th { border-bottom:1px solid var(--line); padding:4px 6px; text-align:left; }
+  .timeline { display:flex; gap:6px; align-items:flex-end; height:86px; margin:8px 0; }
+  .era { flex:1; border-radius:6px 6px 0 0; background:#bfdbfe; border:1px solid #93c5fd; border-bottom:none; text-align:center; font-size:11px; padding-top:6px; cursor:pointer; }
+  .era small { display:block; color:#1e3a8a; }
+  .era[aria-current="true"] { background:#1d4ed8; color:#fff; border-color:#1d4ed8; }
+  .era[aria-current="true"] small { color:#dbeafe; }
+  /* A: breadcrumb + rail */
+  .crumbs { font-size:13px; color:var(--mut); margin:0 0 10px 0; }
+  .crumbs b { color:var(--ink); }
+  .crumbs code { background:#f3f4f6; border:1px solid var(--line); border-radius:4px; padding:0 5px; font-size:12px; }
+  .rail.narrow .row .sub, .rail.narrow h3.group { display:none; }
+  .rail.narrow .row { text-align:center; font-weight:700; }
+  .monthhead { font-size:12px; color:#fff; background:#374151; border-radius:6px; padding:3px 9px; margin-top:8px; }
+  /* B: facet tray + cards */
+  .tray { display:flex; flex-wrap:wrap; gap:14px; border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:#f9fafb; margin-top:10px; font-size:13px; }
+  .tray fieldset { border:none; margin:0; padding:0; }
+  .tray legend { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); padding:0; margin-bottom:4px; }
+  .tray label { display:block; white-space:nowrap; }
+  .tray .count { color:var(--mut); font-size:12px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:10px; margin-top:10px; }
+  .gcard { position:relative; border:1px solid var(--line); border-radius:10px; padding:10px; background:#fff; cursor:pointer; }
+  .gcard[aria-current="true"] { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
+  .gcard .poster { height:64px; border-radius:8px; background:linear-gradient(135deg,#1e3a8a,#3b82f6); color:#fff; display:flex; align-items:flex-end; padding:6px 8px; font-weight:700; font-size:13px; margin-bottom:8px; }
+  .gcard .poster.none { background:linear-gradient(135deg,#7f1d1d,#b91c1c); }
+  .gcard .poster.pending { background:linear-gradient(135deg,#92400e,#d97706); }
+  .gcard .preview { display:none; position:absolute; z-index:5; left:8px; right:8px; top:100%; background:#0f172a; color:#e2e8f0; border-radius:8px; padding:8px 10px; font-size:12px; box-shadow:0 10px 30px rgba(0,0,0,.35); }
+  .gcard:hover .preview, .gcard:focus-within .preview { display:block; }
+  /* C: coverage board */
+  .covrow { display:grid; grid-template-columns:110px 1fr 150px; gap:8px; align-items:center; font-size:12.5px; margin:4px 0; }
+  .covbar { height:14px; background:#f3f4f6; border:1px solid var(--line); border-radius:7px; overflow:hidden; display:flex; }
+  .covbar i { display:block; height:100%; }
+  .covbar .p { background:#10b981; } .covbar .s { background:#f59e0b; }
+  /* H: home shelf + entry tiles */
+  .shelf { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:10px; margin-top:10px; }
+  .feat { border:1px solid var(--line); border-radius:10px; overflow:hidden; background:#fff; cursor:pointer; text-align:left; padding:0; }
+  .feat[aria-current="true"] { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
+  .feat .band { height:74px; display:flex; align-items:flex-end; padding:8px 10px; color:#fff; font-weight:700; font-size:14px; background:linear-gradient(135deg,#1e3a8a,#3b82f6); }
+  .feat .band.none { background:linear-gradient(135deg,#7f1d1d,#b91c1c); }
+  .feat .body { padding:8px 10px; font-size:13px; }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:10px; margin-top:10px; }
+  .tile { border:1px solid var(--line); border-radius:10px; padding:12px; background:#fff; cursor:pointer; text-align:left; }
+  .tile:hover { border-color:var(--accent); }
+  .tile b { font-size:14px; }
+  .row.ledger { font-family:ui-monospace, Menlo, monospace; font-size:12.5px; }
+  .glyph { display:inline-block; width:1.2em; text-align:center; font-weight:700; color:var(--accent); }
+  .tile[aria-current="true"] { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
+  #switcher { position:fixed; left:50%; bottom:14px; transform:translateX(-50%); background:#111827; color:#fff; border-radius:999px; padding:8px 8px; display:flex; gap:10px; align-items:center; box-shadow:0 8px 30px rgba(0,0,0,.35); z-index:50; }
+  #switcher button { background:#1f2937; color:#fff; border:1px solid #374151; border-radius:999px; width:34px; height:34px; }
+  #switcher .lbl { font-size:13px; min-width:220px; text-align:center; }
+  #switcher a { color:#93c5fd; font-size:12px; }
+  .variant { display:none; }
+  .variant.on { display:block; }
+  .search { width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--line); font-size:14px; }
+  kbd { background:#f3f4f6; border:1px solid var(--line); border-radius:4px; padding:0 5px; font-size:12px; }
+</style>
+</head>
+<body>
+<div class="proto-banner"><b>PROTOTYPE — throwaway.</b> Mockup of the archive browse-to-watch flow for ticket #6 (stands in for the egui Shell). Double-click to run. No persistence. Variants switch via <kbd>?variant=H|A|B|C</kbd> or the bottom bar. Shortcuts: <kbd>⌘K</kbd> jump palette · <kbd>/</kbd> focuses search in B · <kbd>j</kbd>/<kbd>k</kbd> steps games in A.</div>
+<header class="page">
+  <h1>Browse-to-watch: Team → Season → Schedule → Game → Box Score + Game Tape</h1>
+  <p><b>Question:</b> which flow shape lets a driver go from a Team through a Season and its Schedule to one Game, always seeing the Box Score, with the Game Tape shown as playable / external / marked unavailable — including defunct Teams and early Seasons?</p>
+  <p class="glossary">Domain language: <b>Season</b> · <b>Team</b> (active or defunct) · <b>Game</b> · <b>Schedule</b> (one Season's games; a Team's games are a view over it) · <b>Box Score</b> (team + player totals) · <b>Game Tape</b> · <b>Tape Source</b> · <b>Source Ladder</b> (rungs 0–7) · <b>External Surface</b> · <b>Cache Tier</b> · <b>Shell</b> · <b>Player Backend</b> (Lane A ffmpeg-native / Lane B embed). Box Score is never unavailable — only Game Tape is.</p>
+  <p class="patterns">Patterns stolen across passes: Basketball-Reference breadcrumbs + month tables + slug crosswalk · Jellyfin shelves, badges, hover previews · Algolia facet trays · TimeSlice timelines + Strava coverage boards · newspaper-agate ledger + tape glyphs, ⌘K jump palette, sweep-ops board (this pass) · egui <code>SidePanel</code> rails, off-thread decode / <code>TextureHandle::set</code>-on-UI-thread, <code>kittest</code>-headless (build notes).</p>
+  <div class="scenarios" id="scenarioBar" aria-label="Edge-case shortcuts"></div>
+</header>
+<main>
+  <!-- ============ VARIANT H (HOME) ============ -->
+  <section class="variant" id="vH">
+    <div class="card" style="margin-bottom:12px"><b>H · Home.</b> <span class="muted">Dedicated landing: featured shelf (title games first), entry tiles into the Browser / Search / Era board, coverage at a glance. Every card deep-links into the Browser at that Game.</span></div>
+    <div class="card"><h2>★ Featured Game Tape</h2><div class="shelf" id="hShelf"></div></div>
+    <div class="card" style="margin-top:12px"><h2>Enter the archive</h2><div style="display:flex;gap:8px;align-items:center;margin-bottom:8px"><label class="muted" for="hSeason">Jump to a Season:</label><select id="hSeason"></select></div><div class="tiles" id="hTiles"></div></div>
+    <div class="grid2" style="margin-top:12px">
+      <div class="card"><h2>Coverage at a glance</h2><div id="hCoverage"></div></div>
+      <div class="card"><h2>Current state (H)</h2><div class="state" id="hState"></div></div>
+    </div>
+  </section>
+
+  <!-- ============ VARIANT A ============ -->
+  <section class="variant" id="vA">
+    <div class="card" style="margin-bottom:12px"><b>A · Season dashboard.</b> <span class="muted">Pick a Season → all its clubs on a dashboard (defunct tagged, seeded + playable counts) → click a Team for its Regular season + Playoffs ledgers → Game. Rail mirrors the dashboard; breadcrumb League › Season › Team › Game.</span></div>
+    <div class="crumbs card" id="aCrumbs"></div>
+    <div class="card" style="margin-bottom:12px"><h2>Teams — this Season <span class="muted">click a Team for its Regular season + Playoffs schedule</span></h2><input class="search" id="aTeamFilter" placeholder="Filter clubs…" aria-label="Filter teams" oninput="renderA()"><div class="tiles" id="aDash" style="margin-top:10px"></div></div>
+    <div class="grid3">
+      <div class="card rail" id="aRail"><h2>Teams — this Season <button id="aRailToggle" title="Collapse rail (egui SidePanel pattern)" style="float:right">⇥</button></h2><div class="list" id="aTeams"></div>
+        <h3>Season</h3><select id="aSeasons" style="width:100%"></select>
+        <p class="muted" id="aSeasonNote"></p></div>
+      <div class="card"><h2>Schedule <span class="muted" id="aSchedTitle"></span></h2><p class="muted">▶ playable · ◌ sweeping · ∅ unavailable · ⧉ exists-not-playable — agate ledger, one line per game.</p><div class="list" id="aGames"></div></div>
+      <div class="card"><h2>Game</h2><div id="aDetail"></div></div>
+    </div>
+    <div class="card" style="margin-top:12px"><h2>Current state (A)</h2><div class="state" id="aState"></div></div>
+  </section>
+
+  <!-- ============ VARIANT B (SPOTLIGHT) ============ -->
+  <section class="variant" id="vB">
+    <div class="card" style="margin-bottom:12px"><b>B · Game spotlight.</b> <span class="muted">Game-first: Season / Team / Game bars on top (Games grouped Regular season + Playoffs), the Game fills the stage, and the Team's schedule runs as a stepping strip (prev/next, click a dot, j/k in A). Navigation is chrome; the Game is the page.</span></div>
+    <div class="card"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <label class="muted">Season <select id="bSeasons"></select></label>
+      <label class="muted">Team <select id="bTeams"></select></label>
+      <label class="muted">Game <select id="bGames"></select></label>
+      <span style="flex:1"></span>
+      <button id="bPrev">← prev</button><button id="bNext">next →</button>
+    </div><div id="bStrip" style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap"></div></div>
+    <div class="card" style="margin-top:12px"><h2>Game</h2><div id="bHero"></div></div>
+    <div class="card" style="margin-top:12px"><h2>Current state (B)</h2><div class="state" id="bState"></div></div>
+  </section>
+
+  <!-- ============ VARIANT C (SHELVES) ============ -->
+  <section class="variant" id="vC">
+    <div class="card" style="margin-bottom:12px"><b>C · Watch shelves.</b> <span class="muted">Availability-first: the Season's seeded games shelved by Game Tape state — playable now, sweep in progress, missing/pointers — with a Team filter. Click a card for the full Game view below.</span></div>
+    <div class="card"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <label class="muted">Season <select id="cSeasons"></select></label>
+      <label class="muted">Team <select id="cTeamF"></select></label>
+    </div></div>
+    <div class="card" style="margin-top:12px"><h2>▶ Playable now</h2><div class="cards" id="cShelfPlay"></div></div>
+    <div class="card" style="margin-top:12px"><h2>◌ Sweep in progress</h2><div class="cards" id="cShelfPend"></div></div>
+    <div class="card" style="margin-top:12px"><h2>∅ ⧉ Missing / pointers</h2><div class="cards" id="cShelfMiss"></div></div>
+    <div class="card" style="margin-top:12px"><h2>Game</h2><div id="cDetail"></div></div>
+    <div class="card" style="margin-top:12px"><h2>Current state (C)</h2><div class="state" id="cState"></div></div>
+  </section>
+</main>
+
+<div id="palette" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:100;justify-content:center;align-items:flex-start;padding-top:12vh" onclick="if(event.target===this)closePalette()">
+  <div class="card" style="width:min(560px,92vw);box-shadow:0 20px 60px rgba(0,0,0,.4)">
+    <input class="search" id="pQ" placeholder="Jump to teams, Seasons, games… (↵ opens, esc closes)" aria-label="Command palette" oninput="renderPalette()" onkeydown="if(event.key==='Enter'){const b=document.querySelector('#pRes .row');if(b)b.click();}if(event.key==='Escape')closePalette()">
+    <div class="list" id="pRes" style="margin-top:8px"></div>
+  </div>
+</div>
+
+<nav id="switcher" aria-label="Prototype variant switcher">
+  <button id="prevV" title="Previous variant (←)">←</button>
+  <div class="lbl"><span id="vLabel"></span><br><a id="vLink" href="#">shareable link</a></div>
+  <button id="nextV" title="Next variant (→)">→</button>
+</nav>
+
+<script>
+"use strict";
+/* Pure throwaway data module (the flow shape is the question; this seed is disposable). */
+const TEAMS = [
+  { id:"TRH", name:"Toronto Huskies", status:"defunct", span:"1946–47" },
+  { id:"CHS", name:"Chicago Stags", status:"defunct", span:"1946–50" },
+  { id:"PIT", name:"Pittsburgh Ironmen", status:"defunct", span:"1946–47" },
+  { id:"CLR", name:"Cleveland Rebels", status:"defunct", span:"1946–47" },
+  { id:"DTF", name:"Detroit Falcons", status:"defunct", span:"1946–47" },
+  { id:"PRO", name:"Providence Steam Rollers", status:"defunct", span:"1946–49" },
+  { id:"STB", name:"St. Louis Bombers", status:"defunct", span:"1946–50" },
+  { id:"WSC", name:"Washington Capitols", status:"defunct", span:"1946–51" },
+  { id:"NYK", name:"New York Knickerbockers", status:"active", span:"1946–" },
+  { id:"BOS", name:"Boston Celtics", status:"active", span:"1946–" },
+  { id:"PHW", name:"Philadelphia Warriors", status:"moved → GSW", span:"1946–62" },
+  { id:"MNL", name:"Minneapolis Lakers", status:"moved → LAL", span:"1947–60" },
+  { id:"CHP", name:"Chicago Packers", status:"moved", span:"1961–62" },
+  { id:"CIN", name:"Cincinnati Royals", status:"moved", span:"1957–72" },
+  { id:"DET", name:"Detroit Pistons", status:"active", span:"1948–" },
+  { id:"STL", name:"St. Louis Hawks", status:"moved", span:"1955–68" },
+  { id:"SYR", name:"Syracuse Nationals", status:"moved", span:"1949–63" },
+  { id:"LAL", name:"Los Angeles Lakers", status:"active", span:"1960–" },
+  { id:"CHI", name:"Chicago Bulls", status:"active", span:"1966–" },
+  { id:"CLE", name:"Cleveland Cavaliers", status:"active", span:"1970–" },
+  { id:"GSW", name:"Golden State Warriors", status:"active", span:"1971–" },
+  { id:"ATL", name:"Atlanta Hawks", status:"active", span:"1968–" },
+  { id:"DAL", name:"Dallas Mavericks", status:"active", span:"1980–" },
+  { id:"DEN", name:"Denver Nuggets", status:"active", span:"1976–" },
+  { id:"HOU", name:"Houston Rockets", status:"active", span:"1967–" },
+  { id:"IND", name:"Indiana Pacers", status:"active", span:"1967–" },
+  { id:"LAC", name:"Los Angeles Clippers", status:"active", span:"1970–" },
+  { id:"MIL", name:"Milwaukee Bucks", status:"active", span:"1968–" },
+  { id:"NJN", name:"New Jersey Nets", status:"moved", span:"1977–2012" },
+  { id:"PHI", name:"Philadelphia 76ers", status:"active", span:"1946–" },
+  { id:"PHX", name:"Phoenix Suns", status:"active", span:"1968–" },
+  { id:"POR", name:"Portland Trail Blazers", status:"active", span:"1970–" },
+  { id:"SAC", name:"Sacramento Kings", status:"active", span:"1945–" },
+  { id:"SAS", name:"San Antonio Spurs", status:"active", span:"1967–" },
+  { id:"SEA", name:"Seattle SuperSonics", status:"moved", span:"1967–2008" },
+  { id:"UTA", name:"Utah Jazz", status:"active", span:"1974–" },
+  { id:"WAS", name:"Washington Wizards", status:"active", span:"1961–" },
+  { id:"CHA", name:"Charlotte Hornets", status:"active", span:"1988–" },
+  { id:"MIA", name:"Miami Heat", status:"active", span:"1988–" },
+  { id:"MIN", name:"Minnesota Timberwolves", status:"active", span:"1989–" },
+  { id:"ORL", name:"Orlando Magic", status:"active", span:"1989–" },
+  { id:"BKN", name:"Brooklyn Nets", status:"active", span:"1967–" },
+  { id:"MEM", name:"Memphis Grizzlies", status:"active", span:"1995–" },
+  { id:"NOP", name:"New Orleans Pelicans", status:"active", span:"1988–" },
+  { id:"OKC", name:"Oklahoma City Thunder", status:"active", span:"1967–" },
+  { id:"TOR", name:"Toronto Raptors", status:"active", span:"1995–" },
+];
+const SEASON_ROSTER = {
+  "1946–47":["BOS","CHS","CLR","DTF","NYK","PHW","PIT","PRO","STB","TRH","WSC"],
+  "1961–62":["BOS","CHP","CIN","DET","LAL","NYK","PHW","STL","SYR"],
+  "1986–87":["ATL","BOS","CHI","CLE","DAL","DEN","DET","GSW","HOU","IND","LAC","LAL","MIL","NJN","NYK","PHI","PHX","POR","SAC","SAS","SEA","UTA","WAS"],
+  "1990–91":["ATL","BOS","CHA","CHI","CLE","DAL","DEN","DET","GSW","HOU","IND","LAC","LAL","MIA","MIL","MIN","NJN","NYK","ORL","PHI","PHX","POR","SAC","SAS","SEA","UTA","WAS"],
+  "2015–16":["ATL","BOS","BKN","CHA","CHI","CLE","DAL","DEN","DET","GSW","HOU","IND","LAC","LAL","MEM","MIA","MIL","MIN","NOP","NYK","OKC","ORL","PHI","PHX","POR","SAC","SAS","TOR","UTA","WAS"],
+  "2025–26":["ATL","BOS","BKN","CHA","CHI","CLE","DAL","DEN","DET","GSW","HOU","IND","LAC","LAL","MEM","MIA","MIL","MIN","NOP","NYK","OKC","ORL","PHI","PHX","POR","SAC","SAS","TOR","UTA","WAS"],
+};
+const roster = s => SEASON_ROSTER[s]||[];
+const SEASONS = ["1946–47","1961–62","1986–87","1990–91","2015–16","2025–26"];
+const firstSeasonFor = id => SEASONS.find(s=>(SEASON_ROSTER[s]||[]).includes(id))||state.season;
+const GAMES = [
+  { id:"194611010TRH", date:"1946-11-01", month:"November 1946", season:"1946–47", era:"Pre-70", away:"TRH", home:"NYK", label:"Huskies @ Knickerbockers", finals:false, stage:"reg", round:"", note:"Opening-night era; per-game Box carries FG/FT/PF/PTS only",
+    box:{ away:"TRH 66", home:"NYK 68", players:[["E. Sadowski (TRH)","7 FG · 5 FT · 5 PF · 19 PTS"],["L. Hermsen (TRH)","5 FG · 2 FT · 4 PF · 12 PTS"],["O. Schectman (NYK)","6 FG · 3 FT · 2 PF · 15 PTS"]], missing:["MIN","TRB","AST","STL","BLK","3P — not recorded in 1946–47"] },
+    tape:{ state:"UNAVAILABLE", conf:"—", lane:"—", swept:"2026-08-30", rescan:"2026-11-28 (58 days)", line:"No Game Tape after sweeping rungs 0–4 (pre-1970 ≈0%; IA holds 2 noise items 1946–59). Next re-scan in 90 days.", rungs:[["0 official","queried 08-30 — miss"],["1 IA","queried 08-30 — miss"],["2 YouTube","queried 08-29 — miss"],["3 non-Anglo","queried 08-29 — miss"],["4 empty-corpus","queried 08-29 — miss"],["5 catalogs","pointer: none"],["6 purchase","pointer: none"],["7 institutional","pointer: none"]] } },
+  { id:"194611020PIT", date:"1946-11-02", month:"November 1946", season:"1946–47", era:"Pre-70", away:"CHS", home:"PIT", label:"Stags @ Ironmen", finals:false, stage:"reg", round:"", note:"First-week BAA; thin Box.",
+    box:{ away:"CHS 53", home:"PIT 56", players:[["M. Zaslofsky (CHS)","9 FG · 4 FT · 3 PF · 22 PTS"],["C. Halbert (PIT)","7 FG · 6 FT · 4 PF · 20 PTS"],["—","—"]], missing:["MIN","TRB","AST","STL","BLK","3P — not recorded in 1946–47"] },
+    tape:{ state:"UNAVAILABLE", conf:"—", lane:"—", swept:"2026-08-30", rescan:"2026-11-28 (58 days)", line:"No Game Tape after sweeping rungs 0–4.", rungs:[["0 official","queried 08-30 — miss"],["1 IA","queried 08-30 — miss"],["2 YouTube","queried 08-29 — miss"],["5 catalogs","pointer: none"]] } },
+  { id:"194611050CHS", date:"1946-11-05", month:"November 1946", season:"1946–47", era:"Pre-70", away:"TRH", home:"CHS", label:"Huskies @ Stags", finals:false, stage:"reg", round:"", note:"Toronto's second week; franchise folds after one Season.",
+    box:{ away:"TRH 58", home:"CHS 64", players:[["E. Sadowski (TRH)","8 FG · 6 FT · 4 PF · 22 PTS"],["M. Zaslofsky (CHS)","10 FG · 3 FT · 2 PF · 23 PTS"],["—","—"]], missing:["MIN","TRB","AST","STL","BLK","3P — not recorded in 1946–47"] },
+    tape:{ state:"UNAVAILABLE", conf:"—", lane:"—", swept:"2026-08-31", rescan:"2026-12-02 (62 days)", line:"No Game Tape after sweeping rungs 0–4.", rungs:[["0 official","queried 08-31 — miss"],["1 IA","queried 08-31 — miss"],["2 YouTube","queried 08-30 — miss"]] } },
+  { id:"196110210NYK", date:"1961-10-21", month:"October 1961", season:"1961–62", era:"Pre-70", away:"PHW", home:"NYK", label:"Warriors @ Knickerbockers", finals:false, stage:"reg", round:"", note:"Opening week of Wilt's 50-ppg Season.",
+    box:{ away:"PHW 122", home:"NYK 118", players:[["W. Chamberlain (PHW)","48 PTS"],["R. Guerin (NYK)","30 PTS"],["—","—"]], missing:[] },
+    tape:{ state:"UNAVAILABLE", conf:"—", lane:"—", swept:"2026-09-01", rescan:"2026-12-05 (65 days)", line:"No Game Tape after sweeping rungs 0–4.", rungs:[["0 official","miss"],["1 IA","queried 09-01 — miss"],["2 YouTube","queried 09-01 — miss"]] } },
+  { id:"196203020PHW", date:"1962-03-02", month:"March 1962", season:"1961–62", era:"Pre-70", away:"NYK", home:"PHW", label:"Knicks vs Warriors — Wilt 100", finals:false, stage:"reg", round:"", note:"Hershey, PA. No known Game Tape; 4th-quarter radio call only.",
+    box:{ away:"NYK 147", home:"PHW 169", players:[["W. Chamberlain (PHW)","36 FG · 28 FT · 2 PF · 100 PTS"],["A. Lovellette (PHW)","—"],["R. Guerin (NYK)","—"]], missing:[] },
+    tape:{ state:"EXISTS_NOT_STREAMABLE", conf:"REVIEW", lane:"pointer", swept:"2026-09-01", rescan:"— (pointer, no re-scan)", line:"EXISTS, not playable: no Game Tape known (institutional/newsreel pointer only + NBA radio call). Recorded as pointer, never as playable.", rungs:[["0 official","miss"],["1 IA","miss"],["2 YouTube","edited footage only — not full game"],["5 catalogs","pointer: Lost Media Wiki chase"],["7 institutional","pointer: Paley/UCLA existence check"]] } },
+  { id:"198612120BOS", date:"1986-12-12", month:"December 1986", season:"1986–87", era:"80s", away:"LAL", home:"BOS", label:"Regular season — Lakers @ Celtics", finals:false, stage:"reg", round:"", note:"Christmas-race preview of the Finals rematch.",
+    box:{ away:"LAL 117", home:"BOS 110", players:[["M. Johnson (LAL)","28 PTS · 14 AST"],["L. Bird (BOS)","30 PTS · 11 TRB"],["K. McHale (BOS)","22 PTS"]], missing:[] },
+    tape:{ state:"SWEEPING", conf:"REVIEW", lane:"sweep in progress", swept:"queued", rescan:"when quota allows (≤100 searches/day)", line:"Box Score shown now; Game Tape sweep queued.", rungs:[["0 official","queued"],["1 IA","queued"],["2 YouTube","queued"]] } },
+  { id:"198706140BOS", date:"1987-06-14", month:"June 1987", season:"1986–87", era:"80s", away:"BOS", home:"LAL", label:"Finals G6 — Celtics @ Lakers", finals:true, stage:"playoff", round:"Finals G6", note:"Showtime close-out era.",
+    box:{ away:"BOS 93", home:"LAL 105", players:[["M. Johnson (LAL)","16 PTS · 19 AST"],["K. Abdul-Jabbar (LAL)","32 PTS"],["L. Bird (BOS)","28 PTS · 10 TRB"]], missing:[] },
+    tape:{ state:"LANE_A_READY", conf:"CONFIRMED", lane:"Lane A (ffmpeg-native)", swept:"2026-09-05", rescan:"— (playable)", line:"Playable in-window: IA VHS-rip progressive file → Player Backend Lane A; Cache Tier can hold a normalized MP4 (+faststart). Build note: decode off-thread, TextureHandle::set on the UI thread.", rungs:[["0 official","hit: Classic Games catalog"],["1 IA","CONFIRMED progressive file"],["2 YouTube","LIKELY mirror"]] } },
+  { id:"199011090BOS", date:"1990-11-09", month:"November 1990", season:"1990–91", era:"90s", away:"CHI", home:"BOS", label:"Regular season — Bulls @ Celtics", finals:false, stage:"reg", round:"", note:"Early title-season road test.",
+    box:{ away:"CHI 116", home:"BOS 112", players:[["M. Jordan (CHI)","38 PTS"],["L. Bird (BOS)","26 PTS · 9 TRB"],["S. Pippen (CHI)","22 PTS"]], missing:[] },
+    tape:{ state:"LANE_A_READY", conf:"LIKELY", lane:"Lane A (ffmpeg-native)", swept:"2026-09-04", rescan:"— (playable)", line:"Playable in-window: IA VHS-rip progressive file → Lane A.", rungs:[["1 IA","LIKELY progressive file"],["0 official","miss"]] } },
+  { id:"199105190CHI", date:"1991-05-19", month:"May 1991", season:"1990–91", era:"90s", away:"DET", home:"CHI", label:"ECF G1 — Pistons @ Bulls", finals:false, stage:"playoff", round:"ECF G1", note:"The sweep that ended the Bad Boys.",
+    box:{ away:"DET 83", home:"CHI 94", players:[["M. Jordan (CHI)","32 PTS"],["I. Thomas (DET)","21 PTS"],["S. Pippen (CHI)","18 PTS · 11 TRB"]], missing:[] },
+    tape:{ state:"LANE_B_EMBED", conf:"CONFIRMED", lane:"Lane B (sanctioned embed)", swept:"2026-09-05", rescan:"— (playable)", line:"Playable in-window via Lane B sanctioned embed.", rungs:[["0 official","CONFIRMED: free tier"],["2 YouTube","CONFIRMED"]] } },
+  { id:"199106120LAL", date:"1991-06-12", month:"June 1991", season:"1990–91", era:"90s", away:"LAL", home:"CHI", label:"Finals G5 — Lakers @ Bulls (title)", finals:true, stage:"playoff", round:"Finals G5", note:"First Bulls title; official free tier covers all Finals since 1990.",
+    box:{ away:"LAL 101", home:"CHI 108", players:[["M. Jordan (CHI)","30 PTS · 10 AST"],["S. Pippen (CHI)","32 PTS"],["M. Johnson (LAL)","20 PTS · 11 AST"]], missing:[] },
+    tape:{ state:"LANE_B_EMBED", conf:"CONFIRMED", lane:"Lane B (sanctioned embed)", swept:"2026-09-06", rescan:"— (playable)", line:"Playable in-window via Lane B sanctioned embed (Classic Games YouTube playlist mirror). Extraction-to-ffmpeg is gate-failing — never an app feature.", rungs:[["0 official","CONFIRMED: free tier + playlist proxy"],["2 YouTube","CONFIRMED via choucisan crosswalk"],["1 IA","miss"]] } },
+  { id:"201512250CLE", date:"2015-12-25", month:"December 2015", season:"2015–16", era:"10s+", away:"GSW", home:"CLE", label:"Regular season — Warriors @ Cavaliers (Christmas)", finals:false, stage:"reg", round:"", note:"Finals rematch, mid-73-win run.",
+    box:{ away:"GSW 89", home:"CLE 83", players:[["S. Curry (GSW)","19 PTS"],["L. James (CLE)","25 PTS · 9 TRB"],["D. Green (GSW)","22 PTS"]], missing:[] },
+    tape:{ state:"LANE_B_EMBED", conf:"CONFIRMED", lane:"Lane B (sanctioned embed)", swept:"2026-09-06", rescan:"— (playable)", line:"Playable in-window via Lane B sanctioned embed.", rungs:[["0 official","CONFIRMED"],["2 YouTube","CONFIRMED"]] } },
+  { id:"201606190CLE", date:"2016-06-19", month:"June 2016", season:"2015–16", era:"10s+", away:"CLE", home:"GSW", label:"Finals G7 — Cavaliers @ Warriors", finals:true, stage:"playoff", round:"Finals G7", note:"73-win Finals; modern Box has PLUS_MINUS via stats.nba.com enrichment.",
+    box:{ away:"CLE 93", home:"GSW 89", players:[["L. James (CLE)","27 PTS · 11 TRB · 11 AST"],["K. Irving (CLE)","26 PTS"],["D. Green (GSW)","32 PTS · 15 TRB"]], missing:[] },
+    tape:{ state:"LANE_B_EMBED", conf:"CONFIRMED", lane:"Lane B + Cache Tier", swept:"2026-09-06", rescan:"— (playable)", line:"Lane B embed (playlist mirror). NBA App holds the same Game as an External Surface (Widevine — no lawful in-window lane); downloadable copies may sit in the Cache Tier.", rungs:[["0 official","CONFIRMED (App origin + playlist proxy)"],["2 YouTube","CONFIRMED"],["1 IA","miss"]] } },
+  { id:"202601150BOS", date:"2026-01-15", month:"January 2026", season:"2025–26", era:"10s+", away:"LAL", home:"BOS", label:"Regular season — Lakers @ Celtics", finals:false, stage:"reg", round:"", note:"Frozen per-season archive; VIDEO_AVAILABLE flag enriches.",
+    box:{ away:"LAL 105", home:"BOS 118", players:[["J. Tatum (BOS)","34 PTS"],["L. Dončić (LAL)","29 PTS · 10 AST"],["—","—"]], missing:[] },
+    tape:{ state:"SWEEPING", conf:"REVIEW", lane:"sweep in progress", swept:"queued", rescan:"when quota allows (≤100 searches/day)", line:"Box Score shown now; Game Tape sweep queued.", rungs:[["0 official","queued"],["1 IA","queued"],["2 YouTube","queued"]] } },
+  { id:"202602040NYK", date:"2026-02-04", month:"February 2026", season:"2025–26", era:"10s+", away:"BOS", home:"NYK", label:"Regular season — Celtics @ Knickerbockers", finals:false, stage:"reg", round:"", note:"Frozen per-season archive; stats.nba.com VIDEO_AVAILABLE flag enriches.",
+    box:{ away:"BOS 112", home:"NYK 109", players:[["J. Tatum (BOS)","31 PTS"],["J. Brunson (NYK)","29 PTS · 8 AST"],["—","—"]], missing:[] },
+    tape:{ state:"SWEEPING", conf:"REVIEW", lane:"sweep in progress", swept:"queued", rescan:"when quota allows (≤100 searches/day)", line:"Box Score shown now; Game Tape sweep queued (rungs 0–2 first, ≤4 query variants). Never blocks the Box.", rungs:[["0 official","queued"],["1 IA","queued"],["2 YouTube","queued"],["3 non-Anglo","later"]] } },
+];
+const state = { team:"CHI", season:"1990–91", game:"199106120LAL", eraFilter:"", railNarrow:false };
+const teamName = id => (TEAMS.find(t=>t.id===id)||{name:id}).name;
+const gameById = id => GAMES.find(g=>g.id===id);
+const isPlayable = g => g.tape.state==="LANE_A_READY"||g.tape.state==="LANE_B_EMBED";
+const isMissing = g => g.tape.state==="UNAVAILABLE"||g.tape.state==="EXISTS_NOT_STREAMABLE";
+function tapePill(t){ return t.state==="UNAVAILABLE" ? '<span class="pill bad">Game Tape unavailable</span>'
+  : t.state==="EXISTS_NOT_STREAMABLE" ? '<span class="pill warn">Exists — not playable</span>'
+  : t.state==="SWEEPING" ? '<span class="pill warn">Tape sweep in progress</span>'
+  : '<span class="pill ok">Game Tape playable</span>'; }
+function confChip(g){ return g.tape.conf==="—" ? "" : ` <span class="chip">${g.tape.conf}</span>`; }
+function boxHTML(g){
+  return `<table class="box"><tr><th>Side</th><th>Final</th></tr><tr><td>${teamName(g.away)} (away)</td><td>${g.box.away}</td></tr><tr><td>${teamName(g.home)} (home)</td><td>${g.box.home}</td></tr></table>
+  <h3>Player totals (top)</h3><table class="box"><tr><th>Player</th><th>Line</th></tr>${g.box.players.map(p=>`<tr><td>${p[0]}</td><td>${p[1]}</td></tr>`).join("")}</table>
+  ${g.box.missing.length?`<p class="muted">Not recorded in this Season: ${g.box.missing.join(" · ")}</p>`:`<p class="muted">Box Score: team + player totals (no play-by-play, per scope).</p>`}`;
+}
+function tapeHTML(g){
+  const cls = g.tape.state==="UNAVAILABLE" ? "missing" : isPlayable(g) ? "" : "external";
+  return `<div class="tape ${cls}">${tapePill(g.tape)}${confChip(g)} <b>${g.tape.lane}</b><p>${g.tape.line}</p>
+  <p class="muted">Game identity across sources: <b>${g.id}</b> (Box Score slug = crosswalk) · ${g.date} · ${teamName(g.away)} @ ${teamName(g.home)}${g.finals?" · Finals":""}</p></div>`;
+}
+function detailHTML(g){ return `<p><b>${g.label}</b><br><span class="muted">${g.season} · ${g.date} · ${g.note}</span></p>${boxHTML(g)}<h3>Game Tape</h3>${tapeHTML(g)}`; }
+function stateText(){
+  const g = gameById(state.game);
+  return `Team: ${teamName(state.team)} (${state.team})\nSeason: ${state.season}\nSchedule: ${GAMES.filter(x=>x.season===state.season).length} seeded game(s) this Season (full Schedule = every game; a Team's games are a view over it)\nGame: ${g.label} [${g.id}]\nBox Score: ${g.box.away} · ${g.box.home} — always shown\nGame Tape: ${g.tape.state} ${g.tape.conf!=="—"?"("+g.tape.conf+")":""} — ${g.tape.lane}\nPlayer Backend: ${g.tape.state==="LANE_A_READY"?"Lane A ffmpeg→texture":g.tape.state==="LANE_B_EMBED"?"Lane B sanctioned embed":g.tape.state==="SWEEPING"?"sweep queued":"no lane (marked unavailable / pointer)"}`;
+}
+/* ---- Variant A ---- */
+function glyphFor(g){ return g.tape.state==="LANE_A_READY"||g.tape.state==="LANE_B_EMBED" ? "▶" : g.tape.state==="SWEEPING" ? "◌" : g.tape.state==="UNAVAILABLE" ? "∅" : "⧉"; }
+function renderA(){
+  const R = roster(state.season);
+  if(!R.includes(state.team)) state.team = R[0];
+  let gg = gameById(state.game);
+  if(!gg || gg.season!==state.season){ const first=GAMES.find(x=>x.season===state.season); if(first) state.game=first.id; gg = gameById(state.game); }
+  document.getElementById("aCrumbs").innerHTML =
+    `League › <b>${state.season}</b> (${R.length} clubs) › ${teamName(state.team)} (${state.team}) › ${gg.round||gg.month} › <code>${gg.id}.html</code>`;
+  const rail = document.getElementById("aRail");
+  rail.classList.toggle("narrow", state.railNarrow);
+  document.getElementById("aRailToggle").textContent = state.railNarrow ? "⇤" : "⇥";
+  const at = document.getElementById("aTeams"); at.innerHTML = "";
+  R.forEach(id=>{
+    const t = TEAMS.find(t=>t.id===id);
+    const b = document.createElement("button"); b.className="row"; b.setAttribute("aria-current", state.team===id?"true":"false");
+    b.innerHTML = state.railNarrow ? id : `<b>${t.name}</b><br><span class="sub">${t.span}${t.status!=="active"?" · "+t.status:""}</span>`;
+    b.title = t.name; b.onclick = ()=>{ state.team=id; renderAll(); }; at.appendChild(b);
+  });
+  const as = document.getElementById("aSeasons"); as.innerHTML="";
+  SEASONS.forEach(s=>{ const o=document.createElement("option"); o.value=s; o.textContent=`${s} (${roster(s).length} clubs)`; if(s===state.season)o.selected=true; as.appendChild(o); });
+  as.onchange = ()=>{ state.season=as.value; if(!roster(state.season).includes(state.team)) state.team=roster(state.season)[0]; const first=GAMES.find(x=>x.season===state.season); if(first)state.game=first.id; renderAll(); };
+  document.getElementById("aSeasonNote").textContent = state.season==="1946–47" ? "Early Season: Box columns limited (FG/FT/PF/PTS); defunct Teams present." : state.season==="1961–62" ? "No known full-game Game Tape survives for much of this era." : "";
+  const q=(document.getElementById("aTeamFilter").value||"").toLowerCase();
+  const dash=document.getElementById("aDash"); dash.innerHTML="";
+  R.map(id=>TEAMS.find(t=>t.id===id)).filter(t=>!q||(t.name+" "+t.id).toLowerCase().includes(q)).forEach(t=>{
+    const gs=GAMES.filter(x=>x.season===state.season&&(x.away===t.id||x.home===t.id));
+    const p=gs.filter(isPlayable).length;
+    const b=document.createElement("button"); b.className="tile"; if(state.team===t.id)b.setAttribute("aria-current","true");
+    b.innerHTML=`<b>${t.name}</b>${t.status!=="active"?` <span class="pill">${t.status}</span>`:""}<br><span class="muted">${gs.length} seeded · ${p} ▶</span>`;
+    b.onclick=()=>{ state.team=t.id; renderAll(); }; dash.appendChild(b);
+  });
+  if(!dash.children.length) dash.innerHTML='<p class="muted">No club matches this filter.</p>';
+  const teamGames=GAMES.filter(x=>x.season===state.season&&(x.away===state.team||x.home===state.team));
+  const ag = document.getElementById("aGames"); ag.innerHTML="";
+  document.getElementById("aSchedTitle").textContent = `— ${state.season} · ${teamName(state.team)} (Team view over the Schedule) · j/k steps games`;
+  [["Regular season","reg"],["Playoffs","playoff"]].forEach(([label,st])=>{
+    const list=teamGames.filter(x=>x.stage===st);
+    if(!list.length) return;
+    const mh = document.createElement("div"); mh.className="monthhead"; mh.textContent=`${label} (${list.length} seeded)`; ag.appendChild(mh);
+    list.forEach(x=>{
+      const b=document.createElement("button"); b.className="row ledger"; b.setAttribute("aria-current", state.game===x.id?"true":"false");
+      b.innerHTML=`<span class="glyph">${glyphFor(x)}</span> <b>${x.date.slice(5).replace("-","/")} · ${x.box.away} @ ${x.box.home}</b> <span class="sub">${x.round||x.label}${x.finals?" ★":""}</span>`;
+      b.title=`${x.label} — ${x.id}`;
+      b.onclick=()=>{ state.game=x.id; renderAll(); }; ag.appendChild(b);
+    });
+  });
+  if(!ag.children.length) ag.innerHTML='<p class="muted">No seeded games for this Team in the mockup (real Team view = full Schedule slice: ~82 reg + playoffs).</p>';
+  document.getElementById("aDetail").innerHTML = detailHTML(gg);
+  document.getElementById("aState").textContent = stateText();
+}
+/* ---- Variant B (spotlight) ---- */
+function pFiltered(q){
+  q=(q||"").toLowerCase().trim();
+  if(/^[0-9]{9}[a-z]{3}$/i.test(q)) return [{kind:"GAME", g:gameById(q.toUpperCase())}].filter(r=>r.g);
+  const qd=q.replace(/\D/g,"");
+  const seasons=(q&&qd?SEASONS.filter(s=>s.replace(/\D/g,"").includes(qd)):[]).map(s=>({kind:"SEASON", s}));
+  const teams=(q?TEAMS.filter(t=>(t.name+" "+t.id).toLowerCase().includes(q)).slice(0,3):[]).map(t=>({kind:"TEAM", t}));
+  const games=(q?GAMES.filter(g=>(g.label+" "+g.id+" "+g.date+" "+teamName(g.away)+" "+teamName(g.home)+" "+g.season+" "+(g.finals?"finals":"")).toLowerCase().includes(q)):GAMES.slice(0,5)).map(g=>({kind:"GAME", g}));
+  return [...seasons, ...teams, ...games].slice(0,8);
+}
+function openPalette(){ document.getElementById("palette").style.display="flex"; const i=document.getElementById("pQ"); i.value=""; renderPalette(); setTimeout(()=>i.focus(),30); }
+function closePalette(){ document.getElementById("palette").style.display="none"; }
+function renderPalette(){
+  const res=pFiltered(document.getElementById("pQ").value);
+  const box=document.getElementById("pRes"); box.innerHTML="";
+  res.forEach((r,idx)=>{
+    const b=document.createElement("button"); b.className="row";
+    if(r.kind==="GAME"){ const g=r.g;
+      b.innerHTML=`<b>${idx===0?"↵ ":""}${glyphFor(g)} ${g.date} — ${g.label}</b><br><span class="sub">GAME · ${g.box.away} · ${g.box.home} · ${g.id}</span>`;
+      b.onclick=()=>{ closePalette(); state.game=g.id; state.season=g.season; state.team=g.home; setVariant("A"); renderAll(); };
+    } else if(r.kind==="TEAM"){ const t=r.t;
+      b.innerHTML=`<b>${idx===0?"↵ ":""}▦ ${t.name}</b><br><span class="sub">TEAM · ${t.span}${t.status!=="active"?" · "+t.status:""} · open Team dashboard</span>`;
+      b.onclick=()=>{ closePalette(); if(!roster(state.season).includes(t.id)) state.season=firstSeasonFor(t.id); state.team=t.id; setVariant("A"); renderAll(); };
+    } else { const s=r.s;
+      b.innerHTML=`<b>${idx===0?"↵ ":""}▤ ${s} Season</b><br><span class="sub">SEASON · ${roster(s).length} clubs · open Season dashboard</span>`;
+      b.onclick=()=>{ closePalette(); state.season=s; if(!roster(s).includes(state.team)) state.team=roster(s)[0]; setVariant("A"); renderAll(); };
+    }
+    box.appendChild(b);
+  });
+  if(!res.length) box.innerHTML='<p class="muted">No match. Try a team, a season (1991), a game, or a slug.</p>';
+}
+function renderB(){
+  const R = roster(state.season);
+  if(!R.includes(state.team)) state.team = R[0];
+  let gg = gameById(state.game);
+  const teamGames = GAMES.filter(x=>x.season===state.season&&(x.away===state.team||x.home===state.team));
+  if(!gg || gg.season!==state.season || (gg.away!==state.team&&gg.home!==state.team)){ if(teamGames[0]) state.game=teamGames[0].id; gg = gameById(state.game); }
+  const ss=document.getElementById("bSeasons"); ss.innerHTML="";
+  SEASONS.forEach(s=>{ const o=document.createElement("option"); o.value=s; o.textContent=`${s} (${roster(s).length})`; if(s===state.season)o.selected=true; ss.appendChild(o); });
+  ss.onchange=()=>{ state.season=ss.value; if(!roster(state.season).includes(state.team)) state.team=roster(state.season)[0]; renderAll(); };
+  const ttsel=document.getElementById("bTeams"); ttsel.innerHTML="";
+  R.forEach(id=>{ const o=document.createElement("option"); o.value=id; o.textContent=teamName(id); if(id===state.team)o.selected=true; ttsel.appendChild(o); });
+  ttsel.onchange=()=>{ state.team=ttsel.value; renderAll(); };
+  const gs=document.getElementById("bGames"); gs.innerHTML="";
+  [["Regular season","reg"],["Playoffs","playoff"]].forEach(([label,st])=>{
+    const list=teamGames.filter(x=>x.stage===st); if(!list.length) return;
+    const grp=document.createElement("optgroup"); grp.label=label;
+    list.forEach(x=>{ const o=document.createElement("option"); o.value=x.id; o.textContent=`${x.date} — ${x.label} ${glyphFor(x)}`; if(x.id===state.game)o.selected=true; grp.appendChild(o); });
+    gs.appendChild(grp);
+  });
+  gs.onchange=()=>{ state.game=gs.value; renderAll(); };
+  document.getElementById("bPrev").onclick=()=>stepGame(-1);
+  document.getElementById("bNext").onclick=()=>stepGame(1);
+  const strip=document.getElementById("bStrip"); strip.innerHTML="";
+  teamGames.forEach(x=>{
+    const b=document.createElement("button"); b.className="row"; b.style.width="auto"; b.setAttribute("aria-current", x.id===state.game?"true":"false");
+    b.textContent=`${glyphFor(x)} ${x.date.slice(5)} ${x.round||""}`; b.title=`${x.label} — ${x.box.away} · ${x.box.home}`;
+    b.onclick=()=>{ state.game=x.id; renderAll(); }; strip.appendChild(b);
+  });
+  document.getElementById("bHero").innerHTML = detailHTML(gg);
+  document.getElementById("bState").textContent = stateText();
+}
+function stepGame(d){
+  const list=GAMES.filter(x=>x.season===state.season&&(x.away===state.team||x.home===state.team));
+  let i=list.findIndex(x=>x.id===state.game);
+  i=(i+d+list.length)%Math.max(list.length,1);
+  if(list[i]){ state.game=list[i].id; renderAll(); }
+}
+/* ---- Variant C (shelves) ---- */
+function renderC(){
+  const R = roster(state.season);
+  if(!R.includes(state.team)) state.team = R[0];
+  const ss=document.getElementById("cSeasons"); ss.innerHTML="";
+  SEASONS.forEach(s=>{ const o=document.createElement("option"); o.value=s; o.textContent=`${s} (${roster(s).length} clubs)`; if(s===state.season)o.selected=true; ss.appendChild(o); });
+  ss.onchange=()=>{ state.season=ss.value; renderAll(); };
+  const tf=document.getElementById("cTeamF"); const keep=tf.value||"";
+  tf.innerHTML="";
+  [["","All clubs"],...R.map(id=>[id,teamName(id)])].forEach(([v,t])=>{ const o=document.createElement("option"); o.value=v; o.textContent=t; if(v===keep)o.selected=true; tf.appendChild(o); });
+  tf.onchange=()=>renderAll();
+  const teamF=tf.value;
+  const pool=GAMES.filter(g=>g.season===state.season&&(!teamF||g.away===teamF||g.home===teamF));
+  [["cShelfPlay",pool.filter(isPlayable)],["cShelfPend",pool.filter(g=>g.tape.state==="SWEEPING")],["cShelfMiss",pool.filter(g=>g.tape.state==="UNAVAILABLE"||g.tape.state==="EXISTS_NOT_STREAMABLE")]].forEach(([id,list])=>{
+    const box=document.getElementById(id); box.innerHTML="";
+    list.forEach(g=>{
+      const cls = isPlayable(g) ? "" : g.tape.state==="SWEEPING" ? "pending" : "none";
+      const d=document.createElement("div"); d.className="gcard"; d.tabIndex=0; d.setAttribute("aria-current", state.game===g.id?"true":"false");
+      d.innerHTML=`<div class="poster ${cls}">${g.finals?"★ ":""}${g.label}</div><div><span class="sub muted">${g.date} · ${teamName(g.away)} @ ${teamName(g.home)}</span><br>${tapePill(g.tape)}${confChip(g)}</div><div class="preview"><b>Box Score preview</b> — ${g.box.away} · ${g.box.home}<br><span class="muted">Click for full Game view.</span></div>`;
+      d.onclick=()=>{ state.game=g.id; state.team=g.home; state.season=g.season; renderAll(); };
+      d.onkeydown=(e)=>{ if(e.key==="Enter"){ e.preventDefault(); d.onclick(); } };
+      box.appendChild(d);
+    });
+    if(!list.length) box.innerHTML='<p class="muted">None in this seed slice.</p>';
+  });
+  document.getElementById("cDetail").innerHTML = detailHTML(gameById(state.game));
+  document.getElementById("cState").textContent = stateText();
+}
+/* ---- Scenarios + switcher ---- */
+function renderScenarios(){
+  const bar=document.getElementById("scenarioBar"); bar.innerHTML="";
+  [["Defunct Team + thin Box","194611010TRH"],["Tape-missing icon (Wilt 100)","196203020PHW"],["Lane A playable","198706140BOS"],["Lane B embed (title)","199106120LAL"],["External Surface + Cache","201606190CLE"],["Sweep in progress","202602040NYK"]].forEach(([label,id])=>{
+    const b=document.createElement("button"); b.textContent="▶ "+label; b.title=id;
+    b.onclick=()=>{ const g=gameById(id); state.game=id; state.season=g.season; state.team=g.home; renderAll(); window.scrollTo({top:0,behavior:"smooth"}); };
+    bar.appendChild(b);
+  });
+}
+const ORDER=["H","A","B","C"], NAMES={H:"H · Home",A:"A · Season dashboard",B:"B · Game spotlight",C:"C · Watch shelves"};
+function currentVariant(){ const v=new URLSearchParams(location.search).get("variant"); return ORDER.includes(v)?v:"H"; }
+function setVariant(v){ const u=new URL(location.href); u.searchParams.set("variant",v); history.replaceState(null,"","?variant="+v); renderVariant(); }
+function renderVariant(){
+  const v=currentVariant();
+  ORDER.forEach(k=>document.getElementById("v"+k).classList.toggle("on",k===v));
+  document.getElementById("vLabel").textContent = NAMES[v]+"  (?variant="+v+")";
+  document.getElementById("vLink").href = "?variant="+v;
+  document.getElementById("vLink").textContent = "shareable link: ?variant="+v;
+}
+/* ---- Variant H ---- */
+function renderH(){
+  const shelf=document.getElementById("hShelf"); shelf.innerHTML="";
+  GAMES.filter(g=>g.finals).forEach(g=>{
+    const b=document.createElement("button"); b.className="feat"; b.setAttribute("aria-current", state.game===g.id?"true":"false");
+    b.innerHTML=`<div class="band">★ ${g.label}</div><div class="body"><span class="muted">${g.season} · ${g.date}</span><br>${tapePill(g.tape)}${confChip(g)}<br><span class="muted">${g.box.away} · ${g.box.home} → deep-link into Browser</span></div>`;
+    b.onclick=()=>{ state.game=g.id; state.season=g.season; state.team=g.home; setVariant("A"); renderAll(); };
+    shelf.appendChild(b);
+  });
+  const tiles=document.getElementById("hTiles"); tiles.innerHTML="";
+  [["A","Browse the archive",`${TEAMS.length} Teams (incl. ${TEAMS.filter(t=>t.status==="defunct").length} defunct) · ${SEASONS.length} Seasons`],
+   ["B","Search games",`${GAMES.filter(isPlayable).length} playable · ${GAMES.filter(isMissing).length} missing in seed`],
+   ["C","Era board","hit-rates + ladder transparency"]].forEach(([v,t,s])=>{
+    const b=document.createElement("button"); b.className="tile";
+    b.innerHTML=`<b>${t}</b><br><span class="muted">${s}</span>`;
+    b.onclick=()=>setVariant(v); tiles.appendChild(b);
+  });
+  const p=GAMES.filter(isPlayable).length, m=GAMES.filter(isMissing).length, s=GAMES.filter(g=>g.tape.state==="SWEEPING").length;
+  document.getElementById("hCoverage").innerHTML=`<div class="covbar"><i class="p" style="width:${100*p/GAMES.length}%"></i><i class="s" style="width:${100*m/GAMES.length}%"></i></div><p class="muted">${p} playable · ${m} missing · ${s} sweeping (seeded ${GAMES.length}; real archive ≈75k games). Box Score always shown — only Game Tape varies.</p><p><button id="hHuskies">Start at the beginning: Huskies 1946 →</button></p>`;
+  document.getElementById("hHuskies").onclick=()=>{ state.game="194611010TRH"; state.season="1946–47"; state.team="TRH"; setVariant("A"); renderAll(); };
+  const hs=document.getElementById("hSeason"); hs.innerHTML="";
+  SEASONS.forEach(s=>{ const o=document.createElement("option"); o.value=s; o.textContent=`${s} (${roster(s).length} clubs)`; if(s===state.season)o.selected=true; hs.appendChild(o); });
+  hs.onchange=()=>{ state.season=hs.value; if(!roster(state.season).includes(state.team)) state.team=roster(state.season)[0]; setVariant("A"); renderAll(); };
+  document.getElementById("hState").textContent=stateText();
+}
+function renderAll(){ renderH(); renderA(); renderB(); renderC(); renderScenarios(); renderVariant(); }
+document.getElementById("aRailToggle").onclick=()=>{ state.railNarrow=!state.railNarrow; renderA(); };
+document.addEventListener("keydown",e=>{
+  if(/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName||"")||document.activeElement?.isContentEditable) return;
+  const v=currentVariant();
+  if(e.key==="ArrowLeft")document.getElementById("prevV").click();
+  else if(e.key==="ArrowRight")document.getElementById("nextV").click();
+  else if(e.key==="/"){ e.preventDefault(); openPalette(); }
+  else if((e.key==="j"||e.key==="k")&&v==="A"){
+    const list=GAMES.filter(x=>x.season===state.season&&(x.away===state.team||x.home===state.team)); let i=list.findIndex(x=>x.id===state.game);
+    i=(i+(e.key==="j"?1:-1)+list.length)%Math.max(list.length,1);
+    if(list[i]){ state.game=list[i].id; renderAll(); }
+  } else if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="k"){ e.preventDefault(); openPalette(); }
+});
+document.getElementById("prevV").onclick=()=>{ const v=currentVariant(); setVariant(ORDER[(ORDER.indexOf(v)+ORDER.length-1)%ORDER.length]); };
+document.getElementById("nextV").onclick=()=>{ const v=currentVariant(); setVariant(ORDER[(ORDER.indexOf(v)+1)%ORDER.length]); };
+renderAll();
+</script>
+</body>
+</html>
