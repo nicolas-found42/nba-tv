@@ -19,3 +19,4 @@ pub use model::{
     Season, TapeSource, TapeState, Team,
 };
 pub use route::{Crumb, ParseError, Route};
+pub use store::{FixtureStore, PaletteItem, PaletteKind, SeasonCounts};
