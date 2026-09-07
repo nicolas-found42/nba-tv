@@ -29,15 +29,17 @@
 pub mod lane_a;
 pub mod lane_b;
 pub mod playback;
+pub mod pump;
 pub mod resolve;
 
 pub use lane_a::{
     is_moov_first, normalize_args, play_pipe_args, probe_args, seek_play_args, supports_range,
-    FrameToTexture, Mp4RangeReadiness, RawFrame, StubTextureStage, TextureImage,
+    EguiTextureStage, FrameToTexture, Mp4RangeReadiness, RawFrame, StubTextureStage, TextureImage,
 };
 pub use lane_b::{
     load_video_by_id_snippet, nba_app_opener, open_external, youtube_embed_url,
     youtube_embed_url_with_start, ExternalSurface, OpenAction,
 };
 pub use playback::{lane_for, Lane, PlaybackClass};
+pub use pump::{Pump, PumpError};
 pub use resolve::{resolve, CacheEntry, Resolved, TapeSource};

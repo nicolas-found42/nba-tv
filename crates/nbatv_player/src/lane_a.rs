@@ -175,24 +175,54 @@ pub struct StubTextureStage {
     pub last_dims: Option<(u32, u32)>,
 }
 
+/// Shared pure-data validation behind both stages: reject zero extents and
+/// byte-count mismatches without panicking, clone the bytes on success.
+fn convert_validated(frame: &RawFrame) -> Option<TextureImage> {
+    if frame.width == 0 || frame.height == 0 {
+        return None;
+    }
+    let expected = (frame.width as usize)
+        .checked_mul(frame.height as usize)?
+        .checked_mul(4)?;
+    if frame.rgba.len() != expected {
+        return None;
+    }
+    Some(TextureImage {
+        width: frame.width,
+        height: frame.height,
+        rgba: frame.rgba.clone(),
+    })
+}
+
 impl FrameToTexture for StubTextureStage {
     fn convert(&mut self, frame: &RawFrame) -> Option<TextureImage> {
-        if frame.width == 0 || frame.height == 0 {
-            return None;
-        }
-        let expected = (frame.width as usize)
-            .checked_mul(frame.height as usize)?
-            .checked_mul(4)?;
-        if frame.rgba.len() != expected {
-            return None;
-        }
+        let image = convert_validated(frame)?;
         self.frames_converted += 1;
         self.last_dims = Some((frame.width, frame.height));
-        Some(TextureImage {
-            width: frame.width,
-            height: frame.height,
-            rgba: frame.rgba.clone(),
-        })
+        Some(image)
+    }
+}
+
+/// Production frame→texture stage: the type the shell wires to its real
+/// `egui::TextureHandle`.
+///
+/// Same pure-data contract as [`StubTextureStage`] — validate, clone, count
+/// in `frames_converted`, remember `last_dims` — but this is the
+/// shell-facing name: in T4 the shell wraps it with `load_texture` once and
+/// `set` per frame. It stays window/GPU-free here so it remains
+/// unit-testable with no display. [`StubTextureStage`] is kept for tests.
+#[derive(Debug, Default)]
+pub struct EguiTextureStage {
+    pub frames_converted: u64,
+    pub last_dims: Option<(u32, u32)>,
+}
+
+impl FrameToTexture for EguiTextureStage {
+    fn convert(&mut self, frame: &RawFrame) -> Option<TextureImage> {
+        let image = convert_validated(frame)?;
+        self.frames_converted += 1;
+        self.last_dims = Some((frame.width, frame.height));
+        Some(image)
     }
 }
 
@@ -309,6 +339,224 @@ mod tests {
             })
             .is_none());
         assert_eq!(stage.frames_converted, 0);
+    }
+
+    #[test]
+    fn production_stage_accepts_a_well_formed_frame() {
+        let mut stage = EguiTextureStage::default();
+        let frame = RawFrame {
+            width: 3,
+            height: 2,
+            rgba: vec![9; 3 * 2 * 4],
+        };
+        let image = stage.convert(&frame).expect("valid frame converts");
+        assert_eq!(image.width, 3);
+        assert_eq!(image.height, 2);
+        assert_eq!(image.rgba, frame.rgba);
+        assert_eq!(stage.frames_converted, 1);
+        assert_eq!(stage.last_dims, Some((3, 2)));
+    }
+
+    #[test]
+    fn production_stage_rejects_extent_mismatch_without_panicking() {
+        let mut stage = EguiTextureStage::default();
+        // Declared 32x32 (4096 bytes) but handed a truncated buffer.
+        assert!(stage
+            .convert(&RawFrame {
+                width: 32,
+                height: 32,
+                rgba: vec![0; 4095],
+            })
+            .is_none());
+        // Empty buffer against a nonzero extent, and a zero extent outright.
+        assert!(stage
+            .convert(&RawFrame {
+                width: 32,
+                height: 32,
+                rgba: vec![],
+            })
+            .is_none());
+        assert!(stage
+            .convert(&RawFrame {
+                width: 0,
+                height: 0,
+                rgba: vec![],
+            })
+            .is_none());
+        assert_eq!(stage.frames_converted, 0);
+        assert_eq!(stage.last_dims, None);
+    }
+
+    #[test]
+    fn normalize_tail_requests_faststart_out() {
+        let args = normalize_args("tape.mkv", "out.mp4");
+        assert_eq!(
+            args[args.len() - 2..],
+            ["+faststart".to_string(), "out.mp4".to_string()],
+            "normalizer must end with -movflags +faststart <out>, got {args:?}"
+        );
+    }
+
+    #[test]
+    fn normalized_output_models_a_moov_first_round_trip() {
+        // The normalizer emits +faststart, whose post-condition is moov
+        // before mdat. Model that file layout (no re-encode in tests) and
+        // prove the readiness helpers accept exactly that shape.
+        let args = normalize_args("tape.mkv", "out.mp4");
+        assert!(args.iter().any(|a| a == "+faststart"));
+        assert!(is_moov_first(Some(32), Some(4096)));
+        assert!(!is_moov_first(Some(4096), Some(32)));
+        assert!(!is_moov_first(None, Some(4096)));
+        let readiness = Mp4RangeReadiness {
+            moov_first: is_moov_first(Some(32), Some(4096)),
+            accepts_range: supports_range(Some("bytes")),
+        };
+        assert!(readiness.is_progressive_ready());
+        assert!(!Mp4RangeReadiness {
+            moov_first: false,
+            accepts_range: true,
+        }
+        .is_progressive_ready());
+    }
+
+    /// Scan top-level MP4 atoms for `moov`/`mdat` offsets. Returns
+    /// `(moov_offset, mdat_offset)`; either is `None` when absent. Handles
+    /// 32-bit sizes, `size == 1` 64-bit largesize, and `size == 0` (to EOF).
+    fn top_level_offsets(bytes: &[u8]) -> (Option<u64>, Option<u64>) {
+        let mut moov = None;
+        let mut mdat = None;
+        let mut pos = 0usize;
+        while pos + 8 <= bytes.len() {
+            let size32 =
+                u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
+                    as u64;
+            let tag = &bytes[pos + 4..pos + 8];
+            let (header, size) = if size32 == 1 {
+                if pos + 16 > bytes.len() {
+                    break;
+                }
+                let large = u64::from_be_bytes([
+                    bytes[pos + 8],
+                    bytes[pos + 9],
+                    bytes[pos + 10],
+                    bytes[pos + 11],
+                    bytes[pos + 12],
+                    bytes[pos + 13],
+                    bytes[pos + 14],
+                    bytes[pos + 15],
+                ]);
+                (16u64, large)
+            } else {
+                (8u64, size32 as u64)
+            };
+            if size == 0 {
+                // Extends to EOF: record a trailing mdat tag, then stop.
+                if tag == b"mdat" && mdat.is_none() {
+                    mdat = Some(pos as u64);
+                }
+                break;
+            }
+            if size < header || pos as u64 + size > bytes.len() as u64 {
+                break;
+            }
+            if tag == b"moov" && moov.is_none() {
+                moov = Some(pos as u64);
+            } else if tag == b"mdat" && mdat.is_none() {
+                mdat = Some(pos as u64);
+            }
+            if moov.is_some() && mdat.is_some() {
+                break;
+            }
+            pos += size as usize;
+        }
+        (moov, mdat)
+    }
+
+    #[test]
+    fn top_level_offsets_spots_moov_before_mdat() {
+        // ftyp(24) + moov(8) + mdat(8): fabricated atoms, real layout rule.
+        let mut bytes = vec![0u8; 40];
+        bytes[0..4].copy_from_slice(&24u32.to_be_bytes());
+        bytes[4..8].copy_from_slice(b"ftyp");
+        bytes[24..28].copy_from_slice(&8u32.to_be_bytes());
+        bytes[28..32].copy_from_slice(b"moov");
+        bytes[32..36].copy_from_slice(&8u32.to_be_bytes());
+        bytes[36..40].copy_from_slice(b"mdat");
+        let (moov, mdat) = top_level_offsets(&bytes);
+        assert_eq!((moov, mdat), (Some(24), Some(32)));
+        assert!(is_moov_first(moov, mdat));
+    }
+
+    /// Real normalize round-trip: synthesize 1 s of `testsrc`, run the exact
+    /// [`normalize_args`] vector through ffmpeg, then locate `moov`/`mdat`
+    /// in the output bytes and prove [`is_moov_first`]. Skips gracefully
+    /// when ffmpeg is absent. Synthetic media in a temp dir only.
+    #[test]
+    fn normalize_round_trip_writes_moov_first() {
+        if std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+            == false
+        {
+            println!("SKIP normalize_round_trip_writes_moov_first: ffmpeg not installed");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("nbatv-norm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch temp dir");
+        let result = (|| {
+            let src = dir.join("src.mp4");
+            let status = std::process::Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc=duration=1:size=32x32:rate=5",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                ])
+                .arg(&src)
+                .status()
+                .expect("spawn ffmpeg to synthesize fixture");
+            assert!(status.success(), "fixture synthesis must succeed");
+            let out = dir.join("norm.mp4");
+            let args = normalize_args(
+                &src.to_string_lossy().into_owned(),
+                &out.to_string_lossy().into_owned(),
+            );
+            assert!(args.iter().any(|a| a == "+faststart"));
+            // Builders emit argument vectors only (no binary prefix);
+            // spawning is the caller's job.
+            let status = std::process::Command::new("ffmpeg")
+                .args(["-y", "-v", "error"])
+                .args(&args)
+                .status()
+                .expect("spawn ffmpeg normalizer");
+            let bytes = std::fs::read(&out).expect("normalized output exists");
+            let (moov, mdat) = top_level_offsets(&bytes);
+            assert!(
+                moov.is_some() && mdat.is_some(),
+                "normalized MP4 must contain moov + mdat, got {moov:?}/{mdat:?}"
+            );
+            assert!(
+                is_moov_first(moov, mdat),
+                "+faststart must place moov before mdat, got {moov:?}/{mdat:?}"
+            );
+            let readiness = Mp4RangeReadiness {
+                moov_first: is_moov_first(moov, mdat),
+                accepts_range: supports_range(Some("bytes")),
+            };
+            assert!(readiness.is_progressive_ready());
+        })();
+        let _ = std::fs::remove_dir_all(&dir);
+        result
     }
 
     /// Presence probe only: passes whether or not ffmpeg is installed.
