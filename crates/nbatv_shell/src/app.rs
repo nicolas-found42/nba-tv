@@ -25,6 +25,15 @@ pub struct ShellApp {
     palette_query: String,
     /// Outcome of the last Play press (pure resolve-dispatch result).
     last_dispatch: Option<PlayDispatch>,
+    /// Lane B child webview, once opened (only with the `lane-b` feature).
+    /// The webview lives exactly as long as this host: dropping it
+    /// destroys the native child, which is why navigation clears it.
+    #[cfg(feature = "lane-b")]
+    embed_host: Option<crate::embed::EmbedHost>,
+    /// URL currently hosted or attempted-and-failed, so a failing open is
+    /// tried once per dispatch instead of once per frame.
+    #[cfg(feature = "lane-b")]
+    embed_open_url: Option<String>,
 }
 
 impl ShellApp {
@@ -36,6 +45,10 @@ impl ShellApp {
             palette_open: false,
             palette_query: String::new(),
             last_dispatch: None,
+            #[cfg(feature = "lane-b")]
+            embed_host: None,
+            #[cfg(feature = "lane-b")]
+            embed_open_url: None,
         }
     }
 
@@ -45,6 +58,22 @@ impl ShellApp {
 
     pub fn navigate(&mut self, route: Route) {
         self.palette_open = false;
+        if self.route != route {
+            // A Play outcome belongs to the game it was pressed on: leaving
+            // the route retires it, so the next Game view can neither
+            // auto-open nor display the previous game's embed.
+            // `maybe_open_embed` then serves only the viewed game.
+            self.last_dispatch = None;
+        }
+        // The child webview is a native overlay, not an egui widget: it
+        // would float above the next view, so leaving a route destroys it.
+        // The next Game view re-opens for its own dispatch (see
+        // `maybe_open_embed`).
+        #[cfg(feature = "lane-b")]
+        {
+            self.embed_host = None;
+            self.embed_open_url = None;
+        }
         self.route = route;
     }
 
@@ -73,20 +102,54 @@ impl ShellApp {
     /// through [`dispatch_for`].
     ///
     /// Cache Tier lookup is a later slice, so the cache is always `None`
-    /// for now. Recording the outcome spawns nothing and touches no
-    /// network: the effect layer (Lane A pump / Lane B webview) is a later
-    /// slice. Box Score is never consulted (tape-only signal).
+    /// for now. Recording the outcome spawns nothing itself and touches no
+    /// network: Lane B hosts the OpenEmbed outcome via `maybe_open_embed`
+    /// (lane-b feature builds); the Lane A pump spawn is the remaining
+    /// later slice. Box Score is never consulted (tape-only signal).
     pub fn press_play(&mut self, game_id: &str) {
         // Cache Tier lookup is a later slice: no cache yet, always None.
-        // Effect layer (Lane A pump / Lane B webview) is a later slice:
-        // record the pure outcome only — never spawn `Pump`, never touch
-        // the network here.
+        // Lane B effect layer lives in `maybe_open_embed` (lane-b builds);
+        // the Lane A pump spawn is the remaining later slice. This fn
+        // records the pure outcome only — never spawns `Pump`, never
+        // touches the network here.
         let sources = self
             .store
             .game(game_id)
             .map(|game| game.sources.clone())
             .unwrap_or_default();
         self.last_dispatch = Some(dispatch_for(game_id, None, &sources));
+    }
+
+    /// Parent the Lane B child webview for the current Game view, once per
+    /// dispatch. Only with the `lane-b` feature; default builds never call
+    /// this (no `wry` linked) and the Game view shows the URL instead.
+    ///
+    /// Opens only when the route is a Game view whose last dispatch maps
+    /// to a sanctioned embed URL (see [`crate::embed::embed_url_for`]) and
+    /// that URL was not already hosted or attempted: reopening every frame
+    /// would stack native child windows above the egui UI with no z-order
+    /// control (map research #5). A failed open logs once and falls back
+    /// to the Game view's URL + external-fallback note — never a blank lie.
+    #[cfg(feature = "lane-b")]
+    fn maybe_open_embed(&mut self, frame: &eframe::Frame) {
+        let url = match (&self.route, &self.last_dispatch) {
+            (Route::Game { .. }, Some(dispatch)) => crate::embed::embed_url_for(dispatch),
+            _ => None,
+        };
+        let Some(url) = url else {
+            return;
+        };
+        if self.embed_open_url.as_deref() == Some(url.as_str()) {
+            return;
+        }
+        // Drop a stale host before opening so at most one child webview is
+        // ever parented: native overlays ignore egui z-order.
+        self.embed_host = None;
+        match crate::embed::EmbedHost::open(frame, crate::embed::EmbedBounds::PLACEHOLDER, &url) {
+            Ok(host) => self.embed_host = Some(host),
+            Err(err) => eprintln!("lane-b: embed host failed for {url}: {err}"),
+        }
+        self.embed_open_url = Some(url);
     }
 }
 
@@ -139,6 +202,12 @@ impl eframe::App for ShellApp {
                 Route::Game { game_id } => self.show_game(ui, &game_id),
             }
         });
+
+        // Lane B only: parent the child webview for the Game view's
+        // OpenEmbed dispatch (once per dispatch; default builds never
+        // create a WebView — the Game view shows the URL instead).
+        #[cfg(feature = "lane-b")]
+        self.maybe_open_embed(_frame);
 
         if self.palette_open {
             self.show_palette(ctx);
@@ -265,13 +334,45 @@ impl ShellApp {
             ui.horizontal(|ui| {
                 if ui.button("▶ Play in Player Backend").clicked() {
                     // Resolve via nbatv_player and record the pure dispatch
-                    // outcome. The effect layer (Lane A pump / Lane B
-                    // webview) is a later slice: this never spawns `Pump`,
-                    // never opens a surface, and never touches the network.
+                    // outcome. Lane B hosts OpenEmbed via `maybe_open_embed`
+                    // (lane-b builds); the Lane A pump spawn is still a
+                    // later slice. This never spawns `Pump` here and never
+                    // touches the network itself.
                     let game_id = game.game_id.clone();
                     self.press_play(&game_id);
                 }
             });
+        }
+        if let Some(PlayDispatch::OpenEmbed { url }) = self.last_dispatch.as_ref() {
+            ui.separator();
+            ui.strong("Vendor embed — last Play outcome (Lane B)");
+            ui.monospace(url);
+            if crate::embed::is_sanctioned_embed(url) {
+                // The wording must match what this build actually hosts:
+                // default builds link no webview, so they must never claim
+                // one opens.
+                #[cfg(feature = "lane-b")]
+                {
+                    let bounds = crate::embed::EmbedBounds::PLACEHOLDER;
+                    let attempted = self.embed_open_url.as_deref() == Some(url.as_str());
+                    if self.embed_host.is_some() {
+                        ui.weak(format!(
+                            "Embed player hosted in a child webview at {}×{} @ {},{} physical px (placeholder rect).",
+                            bounds.w, bounds.h, bounds.x, bounds.y
+                        ));
+                    } else if attempted {
+                        ui.weak("The child webview failed to open — open the URL above in your browser.");
+                    } else {
+                        ui.weak("Opening the child webview…");
+                    }
+                }
+                #[cfg(not(feature = "lane-b"))]
+                {
+                    ui.weak("This build hosts no webview (rebuild with `--features lane-b`) — open the URL above in your browser.");
+                }
+            } else {
+                ui.weak("This URL fails the embed sanction gate (embeds load only from /embed/ player URLs) — open it in your browser instead.");
+            }
         }
         ui.separator();
         // Box Score always renders, even when tape is unavailable.
@@ -458,5 +559,32 @@ mod tests {
         let mut app = ShellApp::new();
         app.press_play("000000000AAA");
         assert_eq!(app.last_dispatch(), Some(&PlayDispatch::Unavailable));
+    }
+    #[test]
+    fn navigate_to_another_game_retires_last_dispatch() {
+        // Pressing Play on game A then viewing game B must not serve A's
+        // embed on B's view: leaving the route retires the outcome.
+        let mut app = ShellApp::new();
+        app.press_play("194611010TRH");
+        assert!(app.last_dispatch().is_some());
+        app.navigate(Route::Game {
+            game_id: "194704160BOS".into(),
+        });
+        assert_eq!(app.last_dispatch(), None);
+    }
+
+    #[test]
+    fn same_route_navigation_keeps_last_dispatch() {
+        // Re-rendering the same Game view (e.g. ledger Open while already
+        // there) must not wipe the just-pressed outcome.
+        let mut app = ShellApp::new();
+        app.navigate(Route::Game {
+            game_id: "194611010TRH".into(),
+        });
+        app.press_play("194611010TRH");
+        app.navigate(Route::Game {
+            game_id: "194611010TRH".into(),
+        });
+        assert!(app.last_dispatch().is_some());
     }
 }

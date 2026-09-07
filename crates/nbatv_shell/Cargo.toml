@@ -8,5 +8,11 @@ license = "MIT"
 [dependencies]
 eframe = "0.32"
 nbatv_player = { path = "../nbatv_player", version = "0.1.0" }
+raw-window-handle = "0.6"
+wry = { version = "0.45", optional = true }
+
+[features]
+lane-b = ["wry"]
+
 [lints]
 workspace = true

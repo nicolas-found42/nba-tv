@@ -26,8 +26,9 @@ pub struct CacheEntry {
 }
 
 /// What pressing Play resolved to. A pure outcome: recording it spawns
-/// nothing, opens nothing, and touches no network. The effect layer
-/// (Lane A pump / Lane B webview) is a later slice.
+/// nothing, opens nothing, and touches no network. The Lane B webview
+/// hosts the OpenEmbed outcome (`lane-b` feature builds); the Lane A
+/// pump spawn is the remaining later slice.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlayDispatch {
     /// Play a progressive file in Lane A (Cache Tier location or a
@@ -151,7 +152,7 @@ fn youtube_video_id(url: &str) -> Option<String> {
             let boundary_ok = tail
                 .chars()
                 .nth(11)
-                .map_or(true, |next| !is_youtube_id_char(next));
+                .is_none_or(|next| !is_youtube_id_char(next));
             if boundary_ok {
                 return Some(id);
             }
