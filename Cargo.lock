@@ -1778,6 +1778,10 @@ dependencies = [
 [[package]]
 name = "nbatv_ingest"
 version = "0.1.0"
+dependencies = [
+ "nbatv_db",
+ "rusqlite",
+]
 
 [[package]]
 name = "nbatv_ladder"

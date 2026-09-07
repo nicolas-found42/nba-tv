@@ -5,3 +5,6 @@ edition = "2021"
 description = "Bootstrap ingest for the nba-tv personal NBA archive (FTE CSV, validators, snapshot paths)"
 [lints]
 workspace = true
+[dev-dependencies]
+nbatv_db = { path = "../nbatv_db" }
+rusqlite = { version = "0.32", features = ["bundled"] }
