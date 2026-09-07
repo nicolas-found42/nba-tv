@@ -7,5 +7,6 @@ license = "MIT"
 
 [dependencies]
 eframe = "0.32"
+nbatv_player = { path = "../nbatv_player", version = "0.1.0" }
 [lints]
 workspace = true

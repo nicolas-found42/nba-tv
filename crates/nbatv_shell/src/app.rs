@@ -9,6 +9,7 @@
 //! without a display. Never construct this in tests with a display —
 //! drive [`ShellApp::navigate`] and the store queries instead.
 
+use crate::handover::{dispatch_for, PlayDispatch};
 use crate::model::{cell, TapeState};
 use crate::route::Route;
 use crate::store::{FixtureStore, PaletteKind};
@@ -22,6 +23,8 @@ pub struct ShellApp {
     filter: String,
     palette_open: bool,
     palette_query: String,
+    /// Outcome of the last Play press (pure resolve-dispatch result).
+    last_dispatch: Option<PlayDispatch>,
 }
 
 impl ShellApp {
@@ -32,6 +35,7 @@ impl ShellApp {
             filter: String::new(),
             palette_open: false,
             palette_query: String::new(),
+            last_dispatch: None,
         }
     }
 
@@ -53,6 +57,36 @@ impl ShellApp {
 
     pub fn is_palette_open(&self) -> bool {
         self.palette_open
+    }
+
+    /// Outcome of the last Play press, if the button has been pressed.
+    pub fn last_dispatch(&self) -> Option<&PlayDispatch> {
+        self.last_dispatch.as_ref()
+    }
+
+    /// Resolve what pressing Play means for `game_id` and record it.
+    ///
+    /// This is the exact path the Game view's Play button uses, exposed so
+    /// tests can drive it headlessly. It gathers the game's real tape
+    /// source rows from the store (no invented URLs: a game with no rows
+    /// resolves honestly to [`PlayDispatch::Unavailable`]) and dispatches
+    /// through [`dispatch_for`].
+    ///
+    /// Cache Tier lookup is a later slice, so the cache is always `None`
+    /// for now. Recording the outcome spawns nothing and touches no
+    /// network: the effect layer (Lane A pump / Lane B webview) is a later
+    /// slice. Box Score is never consulted (tape-only signal).
+    pub fn press_play(&mut self, game_id: &str) {
+        // Cache Tier lookup is a later slice: no cache yet, always None.
+        // Effect layer (Lane A pump / Lane B webview) is a later slice:
+        // record the pure outcome only — never spawn `Pump`, never touch
+        // the network here.
+        let sources = self
+            .store
+            .game(game_id)
+            .map(|game| game.sources.clone())
+            .unwrap_or_default();
+        self.last_dispatch = Some(dispatch_for(game_id, None, &sources));
     }
 }
 
@@ -230,10 +264,12 @@ impl ShellApp {
         if game.tape == TapeState::Playable {
             ui.horizontal(|ui| {
                 if ui.button("▶ Play in Player Backend").clicked() {
-                    // Follow-up slice: resolve via nbatv_player and hand the
-                    // TapeSource to the Player Backend (Lane A pump / Lane B
-                    // embed). Until then this is a placeholder by design —
-                    // clicking does nothing. No media here.
+                    // Resolve via nbatv_player and record the pure dispatch
+                    // outcome. The effect layer (Lane A pump / Lane B
+                    // webview) is a later slice: this never spawns `Pump`,
+                    // never opens a surface, and never touches the network.
+                    let game_id = game.game_id.clone();
+                    self.press_play(&game_id);
                 }
             });
         }
@@ -366,5 +402,61 @@ mod tests {
         app.set_palette_open(true);
         assert!(app.palette_query.is_empty());
         assert!(app.is_palette_open());
+    }
+
+    #[test]
+    fn fresh_app_has_no_dispatch() {
+        let app = ShellApp::new();
+        assert_eq!(app.last_dispatch(), None);
+    }
+
+    #[test]
+    fn press_play_on_fixture_game_dispatches_progressive() {
+        let mut app = ShellApp::new();
+        app.navigate(Route::Game {
+            game_id: "194611010TRH".into(),
+        });
+        // Same path the Play button uses.
+        app.press_play("194611010TRH");
+        assert_eq!(
+            app.last_dispatch(),
+            Some(&PlayDispatch::PlayProgressive {
+                src: "https://archive.org/details/194611010TRH".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn press_play_with_no_sources_is_honestly_unavailable() {
+        let mut app = ShellApp::new();
+        app.navigate(Route::Game {
+            game_id: "194704160BOS".into(),
+        });
+        // Fixture game with no tape source rows: no fake playable, exactly
+        // Unavailable.
+        app.press_play("194704160BOS");
+        assert_eq!(app.last_dispatch(), Some(&PlayDispatch::Unavailable));
+    }
+
+    #[test]
+    fn press_play_on_pointer_game_shows_pointer() {
+        let mut app = ShellApp::new();
+        app.navigate(Route::Game {
+            game_id: "194711150BOS".into(),
+        });
+        app.press_play("194711150BOS");
+        assert_eq!(
+            app.last_dispatch(),
+            Some(&PlayDispatch::ShowPointer {
+                pointer: "Catalog ref FTE-194711150BOS (pointer only)".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn press_play_on_unknown_game_is_unavailable() {
+        let mut app = ShellApp::new();
+        app.press_play("000000000AAA");
+        assert_eq!(app.last_dispatch(), Some(&PlayDispatch::Unavailable));
     }
 }

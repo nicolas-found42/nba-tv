@@ -4,11 +4,13 @@
 //! Backed by an in-memory [`store::FixtureStore`]; no network, no media.
 
 pub mod app;
+pub mod handover;
 pub mod model;
 pub mod route;
 pub mod store;
 
 pub use app::ShellApp;
+pub use handover::{dispatch_for, CacheEntry, PlayDispatch};
 pub use model::{
     cell, playback_class_for_rank, BoxPlayer, BoxScore, BoxTeam, Game, GameType, PlaybackClass,
     Season, TapeSource, TapeState, Team,
