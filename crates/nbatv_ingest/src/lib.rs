@@ -10,6 +10,8 @@
 //! No network fetches, no media downloads. Paths only — this crate never
 //! writes outside caller-supplied (test-temp) locations.
 
+pub mod crawl;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -1301,6 +1303,10 @@ pub enum FetchError {
     UnsafePath(String),
     Io(std::io::Error),
     Client(String),
+    /// The page does not exist at the source (HTTP 404/410 from the live
+    /// client). Distinct from [`FetchError::Client`] so a crawl driver can
+    /// dead-pool a permanently missing page instead of retrying it.
+    NotFound(String),
     Decode(String),
 }
 
@@ -1310,6 +1316,7 @@ impl fmt::Display for FetchError {
             FetchError::UnsafePath(s) => write!(f, "unsafe snapshot path component: {s}"),
             FetchError::Io(e) => write!(f, "snapshot I/O: {e}"),
             FetchError::Client(s) => write!(f, "fetch failed: {s}"),
+            FetchError::NotFound(s) => write!(f, "page not found: {s}"),
             FetchError::Decode(s) => write!(f, "bad snapshot bytes: {s}"),
         }
     }
@@ -1602,13 +1609,42 @@ pub fn fetch_season<C: FetchClient>(
 }
 
 /// [`fetch_season`] with injectable sleep, so tests can observe etiquette
-/// waits without waiting them.
+/// waits without waiting them. Paces at [`FETCH_MIN_INTERVAL`]; see
+/// [`fetch_season_with_sleeper_at`] for a caller-chosen interval.
 pub fn fetch_season_with_sleeper<C, S>(
     client: &C,
     source: &str,
     season: &str,
     jobs: &[FetchJob],
     out_dir: &Path,
+    sleep: &mut S,
+) -> Result<FetchReport, FetchError>
+where
+    C: FetchClient,
+    S: FnMut(Duration),
+{
+    fetch_season_with_sleeper_at(
+        client,
+        source,
+        season,
+        jobs,
+        out_dir,
+        FETCH_MIN_INTERVAL,
+        sleep,
+    )
+}
+
+/// [`fetch_season_with_sleeper`] with a caller-chosen minimum spacing
+/// between requests. `interval` below [`FETCH_MIN_INTERVAL`] exceeds BR's
+/// robots.txt Crawl-delay 3 — the caller owns that decision (the
+/// `nbatv-crawl` bin exposes it as `--interval`).
+pub fn fetch_season_with_sleeper_at<C, S>(
+    client: &C,
+    source: &str,
+    season: &str,
+    jobs: &[FetchJob],
+    out_dir: &Path,
+    interval: Duration,
     sleep: &mut S,
 ) -> Result<FetchReport, FetchError>
 where
@@ -1627,7 +1663,7 @@ where
             continue;
         }
         if let Some(t0) = last_fetch {
-            let wait = etiquette_delay(t0.elapsed());
+            let wait = interval.saturating_sub(t0.elapsed());
             if !wait.is_zero() {
                 sleep(wait);
             }
