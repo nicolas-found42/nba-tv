@@ -13,6 +13,7 @@
 //! a [`YoutubeQuota`] tracker, and a `YYYY-MM-DD` timestamp. Everything is
 //! offline by construction — the suite links no network implementation.
 
+pub mod drive;
 pub mod fetch;
 pub mod ia_probe;
 pub mod nba_probe;
@@ -22,6 +23,11 @@ pub mod rung4_probe;
 pub mod scorer;
 pub mod sweep;
 pub mod ytdlp_probe;
+
+pub use drive::{
+    drive_sign_in_prompt, mirror_ready_entries, MirrorConfig, MirrorEntry, MirrorError,
+    MirrorOutcome, MirrorReport, RcloneMirror, RcloneOutput,
+};
 
 pub use fetch::{
     cache_path, cache_root, fetch_to_cache, src_tag_for_url, verify, CacheFetchReport, CurlFetcher,

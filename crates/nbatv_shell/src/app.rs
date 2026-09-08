@@ -556,6 +556,11 @@ impl ShellApp {
             counts.seeded,
             counts.playable
         ));
+        // Drive mirror input state, one line: idle or Ready files awaiting
+        // upload. No remote probe here (see `DbStore::mirror_status_line`).
+        if let Some(mirror_line) = self.store.mirror_status_line() {
+            ui.weak(mirror_line);
+        }
         ui.separator();
         ui.horizontal(|ui| {
             ui.label("Filter clubs:");

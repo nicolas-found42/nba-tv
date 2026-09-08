@@ -181,6 +181,25 @@ impl DbStore {
         }
     }
 
+    /// Drive mirror input line for the Season view (`None` = no line: the
+    /// query failed, so nothing renders rather than a wrong count).
+    /// Otherwise names how many `Ready` files await upload, or idle when
+    /// none do. Remote presence is NOT probed here (no subprocess in the
+    /// view layer); the mirror stage reports `RemoteMissing` with its
+    /// one-time sign-in prompt when a run finds no remote.
+    pub fn mirror_status_line(&self) -> Option<String> {
+        let ready = nbatv_db::ready_cache_entries(&self.conn).ok()?;
+        if ready.is_empty() {
+            Some("Drive mirror: idle — no Ready files to upload.".to_owned())
+        } else {
+            let n = ready.len();
+            Some(format!(
+                "Drive mirror: {n} Ready file{} awaiting upload — dry-run first, then apply.",
+                if n == 1 { "" } else { "s" }
+            ))
+        }
+    }
+
     pub fn game(&self, game_id: &str) -> Option<Game> {
         let row = nbatv_db::game_by_id(&self.conn, game_id).unwrap_or_default()?;
         let sources = self.tape_sources(game_id);
@@ -557,6 +576,15 @@ impl Store {
             Store::Db(s) => s.cache_status_line(game_id),
         }
     }
+
+    /// Drive mirror input line for the Season view, if the store can say.
+    /// Fixtures hold no cache rows (offline dev mirrors nothing).
+    pub fn mirror_status_line(&self) -> Option<String> {
+        match self {
+            Store::Fixture(_) => None,
+            Store::Db(s) => s.mirror_status_line(),
+        }
+    }
 }
 
 /// Season slug (`1946-47`) for an archive ending year (`1947`).
@@ -870,5 +898,50 @@ mod tests {
                 "{state:?} rows never surface as playable"
             );
         }
+    }
+
+    #[test]
+    fn mirror_status_line_is_idle_when_nothing_is_ready() {
+        let conn = memdb();
+        let store = DbStore::from_connection(conn);
+        assert_eq!(
+            store.mirror_status_line().as_deref(),
+            Some("Drive mirror: idle — no Ready files to upload.")
+        );
+        // A non-Ready row is not mirror input either.
+        let conn = memdb();
+        nbatv_db::upsert_cache_entry(&conn, &cache_row(nbatv_db::CacheState::Failed)).unwrap();
+        let store = DbStore::from_connection(conn);
+        assert_eq!(
+            store.mirror_status_line().as_deref(),
+            Some("Drive mirror: idle — no Ready files to upload.")
+        );
+        // Fixtures hold no cache rows: no line in offline dev.
+        assert_eq!(
+            Store::Fixture(FixtureStore::fixture()).mirror_status_line(),
+            None
+        );
+    }
+
+    #[test]
+    fn mirror_status_line_counts_ready_files() {
+        let conn = memdb();
+        let mut ready = cache_row(nbatv_db::CacheState::Ready);
+        nbatv_db::upsert_cache_entry(&conn, &ready).unwrap();
+        ready.rank = 4;
+        ready.game_id = "194611020CHS".to_owned();
+        nbatv_db::upsert_cache_entry(&conn, &ready).unwrap();
+        let store = DbStore::from_connection(conn);
+        let line = store
+            .mirror_status_line()
+            .expect("Ready rows are mirror input");
+        assert!(
+            line.contains("2 Ready"),
+            "the line counts Ready files: {line}"
+        );
+        assert!(
+            line.contains("dry-run"),
+            "the line points at preview-before-apply: {line}"
+        );
     }
 }

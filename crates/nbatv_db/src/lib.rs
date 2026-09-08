@@ -850,6 +850,22 @@ pub fn ready_cache_entry_for(conn: &Connection, game_id: &str) -> SqlResult<Opti
     }
 }
 
+/// Every `Ready` Cache Tier row across games, in mirror order (season, then
+/// game, then rank) so a dry-run preview and its apply cannot diverge.
+/// Backs the Drive mirror stage (`nbatv_catalog::drive`): only `Ready` rows
+/// ever reach a manifest, and the order is deterministic whatever the
+/// insertion history was.
+pub fn ready_cache_entries(conn: &Connection) -> SqlResult<Vec<CacheEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT ce.game_id, ce.rank, ce.source_class, ce.local_path, ce.bytes, ce.verified_at, ce.state
+         FROM cache_entries ce LEFT JOIN games g ON g.game_id = ce.game_id
+         WHERE ce.state = 'Ready'
+         ORDER BY COALESCE(g.season, 0), ce.game_id, ce.rank",
+    )?;
+    let rows = stmt.query_map([], cache_entry_from_row)?;
+    rows.collect()
+}
+
 /// The cache state behind the Game view's compact status line: the row
 /// Play would take — the best-ranked Ready entry when one exists (a
 /// lower-rank failure must not hide a playable local file), else the
