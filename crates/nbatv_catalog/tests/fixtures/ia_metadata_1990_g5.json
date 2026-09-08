@@ -1,0 +1,31 @@
+{
+  "files": [
+    {
+      "format": "MPEG4",
+      "length": "7621.50",
+      "name": "Detroit Pistons Vs Portland Trailblazers 1990 NBA Finals Game 5.mp4",
+      "size": "640123456",
+      "source": "original"
+    },
+    {
+      "format": "Metadata",
+      "name": "detroit-pistons-vs-portland-trailblazers-1990-nba-finals-game-5_files.xml",
+      "source": "derivative"
+    },
+    {
+      "format": "Thumbnail",
+      "name": "detroit-pistons-vs-portland-trailblazers-1990-nba-finals-game-5.thumbs/Game 5_000001.jpg",
+      "source": "derivative"
+    },
+    {
+      "format": "Metadata",
+      "name": "detroit-pistons-vs-portland-trailblazers-1990-nba-finals-game-5_meta.sqlite",
+      "source": "derivative"
+    }
+  ],
+  "metadata": {
+    "description": "1990 NBA Finals Game 5 between the Detroit Pistons and Portland Trail Blazers.",
+    "identifier": "detroit-pistons-vs-portland-trailblazers-1990-nba-finals-game-5",
+    "title": "Detroit Pistons Vs Portland Trailblazers 1990 NBA Finals Game 5"
+  }
+}

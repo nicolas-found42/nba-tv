@@ -1,0 +1,14 @@
+{
+  "response": {
+    "docs": [],
+    "numFound": 0,
+    "start": 0
+  },
+  "responseHeader": {
+    "params": {
+      "query": "identifier:(*nba*finals*game*) AND mediatype:(movies)"
+    },
+    "QTime": 11,
+    "status": 0
+  }
+}

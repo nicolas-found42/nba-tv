@@ -2471,6 +2471,7 @@ version = "0.1.0"
 dependencies = [
  "nbatv_db",
  "nbatv_ladder",
+ "parking_lot",
  "rusqlite",
 ]
 

@@ -35,6 +35,10 @@ use crate::model::{
 use crate::route::Route;
 use crate::store::{FixtureStore, PaletteItem, PaletteKind, SeasonCounts};
 use nbatv_catalog::{
+    game_context_for, sweep_game, IaProbe, PolitenessConfig, ProbeRegistry, SweepError,
+    SweepReport, YoutubeQuota,
+};
+use nbatv_catalog::{
     review_list as catalog_review_list, sweep_status_for, ReviewItem, SweepStatus,
 };
 
@@ -356,6 +360,35 @@ impl DbStore {
             })
             .map(|s| s.slug.clone())
             .unwrap_or_else(|| "1946-47".to_string())
+    }
+}
+
+/// Rung-1 live sweep entry point (issue #21): runs the Internet Archive
+/// probe for one archived game and persists the evidence through the
+/// catalog sweep. Other rungs stay unswept until their probes land. The
+/// probe carries its own transport (live `curl` in production, stubs in
+/// tests), so this seam stays offline-safe under injection.
+impl DbStore {
+    /// Sweep `game_id` through the rung-1 Internet Archive probe.
+    ///
+    /// Returns `None` when the game is unknown to the archive (nothing to
+    /// probe, nothing recorded). A found full game becomes a rank-1
+    /// `tape_sources` row, and Play then streams it in-window through the
+    /// existing Lane A session — no further wiring.
+    pub fn sweep_ia_rung(
+        &self,
+        probe: &IaProbe,
+        game_id: &str,
+        politeness: &PolitenessConfig,
+        quota: &mut YoutubeQuota,
+        now: &str,
+    ) -> Result<Option<SweepReport>, SweepError> {
+        let Some(game) = game_context_for(&self.conn, game_id)? else {
+            return Ok(None);
+        };
+        let mut registry = ProbeRegistry::new();
+        registry.register(probe);
+        sweep_game(&self.conn, &game, &registry, politeness, quota, now).map(Some)
     }
 }
 

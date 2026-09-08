@@ -134,9 +134,11 @@ pub fn sweep_game(
     let mut probed: Vec<u8> = Vec::new();
 
     for rung in 0u8..=4 {
-        // Fresh rows inside the rescan window resume without re-probing.
+        // Fresh rows inside the rung's rescan window resume without
+        // re-probing: the NBA catalog re-enumerates monthly (rung 0), the
+        // rest of the ladder re-checks after the ladder's 90-day cadence.
         if let Some(row) = stored.get(&rung) {
-            if is_fresh(&row.queried_at, now_days) {
+            if is_fresh(&row.queried_at, now_days, rescan_days(rung)) {
                 let best = parse_level(&row.best_match_level).unwrap_or(MatchLevel::Reject);
                 evals.push(stored_eval(&game.game_id, row, best));
                 if best >= MatchLevel::Likely {
@@ -327,15 +329,24 @@ fn review_item(row: GameQuery) -> ReviewItem {
     }
 }
 
-/// Fresh inside the 90-day rescan window. Future stamps (clock skew) stay
-/// fresh rather than forcing a re-probe; unparseable stamps re-probe.
-fn is_fresh(queried_at: &str, now_days: i64) -> bool {
+/// Fresh inside the rung's rescan window: the NBA catalog (rung 0)
+/// re-enumerates monthly, every other rung re-checks on the ladder's
+/// 90-day cadence. Future stamps (clock skew) stay fresh rather than
+/// forcing a re-probe; unparseable stamps re-probe.
+fn is_fresh(queried_at: &str, now_days: i64, window_days: i64) -> bool {
     match parse_date(queried_at) {
-        Some(queried) if queried <= now_days => {
-            now_days - queried < nbatv_ladder::exhaustion::RESCAN_AFTER_DAYS as i64
-        }
+        Some(queried) if queried <= now_days => now_days - queried < window_days,
         Some(_) => true,
         None => false,
+    }
+}
+
+/// Rescan window for one rung, in days.
+fn rescan_days(rung: u8) -> i64 {
+    if rung == 0 {
+        crate::nba_probe::NBA_CATALOG_REFRESH_DAYS as i64
+    } else {
+        nbatv_ladder::exhaustion::RESCAN_AFTER_DAYS as i64
     }
 }
 
@@ -374,18 +385,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn date_math_matches_the_90_day_window() {
-        let jan1 = parse_date("2026-01-01").unwrap();
-        assert!(is_fresh("2026-01-01", parse_date("2026-01-15").unwrap()));
-        assert!(is_fresh("2026-01-01", parse_date("2026-03-31").unwrap()));
-        assert!(!is_fresh("2026-01-01", parse_date("2026-04-01").unwrap()));
-        assert!(!is_fresh("2026-01-01", parse_date("2026-04-02").unwrap()));
+    fn date_math_matches_the_rescan_windows() {
+        let (d90, d30) = (rescan_days(1), rescan_days(0));
+        assert_eq!(d90, 90);
+        assert_eq!(d30, 30);
+        // Rungs 1-4: 90-day cadence.
+        assert!(is_fresh(
+            "2026-01-01",
+            parse_date("2026-01-15").unwrap(),
+            d90
+        ));
+        assert!(is_fresh(
+            "2026-01-01",
+            parse_date("2026-03-31").unwrap(),
+            d90
+        ));
+        assert!(!is_fresh(
+            "2026-01-01",
+            parse_date("2026-04-01").unwrap(),
+            d90
+        ));
+        // Rung 0: the NBA catalog re-enumerates monthly — a row 30+ days
+        // old is due even though the 90-day ladder window would call it
+        // fresh.
+        assert!(is_fresh(
+            "2026-01-01",
+            parse_date("2026-01-30").unwrap(),
+            d30
+        ));
+        assert!(!is_fresh(
+            "2026-01-01",
+            parse_date("2026-01-31").unwrap(),
+            d30
+        ));
+        assert!(!is_fresh(
+            "2026-01-01",
+            parse_date("2026-02-15").unwrap(),
+            d30
+        ));
         assert!(parse_date("2026-13-01").is_none());
         assert!(parse_date("2026-1-1").is_none());
         // RFC 3339 timestamps work: only the date prefix is read.
         assert_eq!(parse_date("2026-01-01T00:00:00Z"), parse_date("2026-01-01"));
     }
-
     #[test]
     fn rung_names_come_from_the_ladder() {
         assert_eq!(rung_name(1), "internet-archive");

@@ -1,0 +1,25 @@
+{
+  "response": {
+    "docs": [
+      {
+        "date": "2024-01-01",
+        "identifier": "nba-finals-classic-promo",
+        "title": "NBA Finals Classic Promo (sports talk)"
+      },
+      {
+        "date": "1990-06-14",
+        "identifier": "detroit-pistons-vs-portland-trailblazers-1990-nba-finals-game-5",
+        "title": "Detroit Pistons Vs Portland Trailblazers 1990 NBA Finals Game 5"
+      }
+    ],
+    "numFound": 2,
+    "start": 0
+  },
+  "responseHeader": {
+    "params": {
+      "query": "identifier:(*nba*finals*game*) AND mediatype:(movies)"
+    },
+    "QTime": 42,
+    "status": 0
+  }
+}

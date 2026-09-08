@@ -1,0 +1,71 @@
+{
+  "files": [
+    {
+      "format": "MPEG4",
+      "length": "8453.92",
+      "name": "1996 NBA Finals Game 1.mp4",
+      "size": "607614637",
+      "source": "original"
+    },
+    {
+      "format": "MPEG4",
+      "length": "8494.65",
+      "name": "1996 NBA Finals Game 2.mp4",
+      "size": "633662803",
+      "source": "original"
+    },
+    {
+      "format": "MPEG4",
+      "length": "8286.37",
+      "name": "1996 NBA Finals Game 3.mp4",
+      "size": "714032228",
+      "source": "original"
+    },
+    {
+      "format": "MPEG4",
+      "length": "7701.08",
+      "name": "1996 NBA Finals Game 4.mp4",
+      "size": "572866749",
+      "source": "original"
+    },
+    {
+      "format": "MPEG4",
+      "length": "7912.39",
+      "name": "1996 NBA Finals Game 5.mp4",
+      "size": "599641949",
+      "source": "original"
+    },
+    {
+      "format": "MPEG4",
+      "length": "8373.65",
+      "name": "1996 NBA Finals Game 6.mp4",
+      "size": "681491999",
+      "source": "original"
+    },
+    {
+      "format": "Thumbnail",
+      "name": "1996-nba-finals-game-3.thumbs/1996 NBA Finals Game 1_000001.jpg",
+      "source": "derivative"
+    },
+    {
+      "format": "Thumbnail",
+      "name": "1996-nba-finals-game-3.thumbs/1996 NBA Finals Game 1_000492.jpg",
+      "source": "derivative"
+    },
+    {
+      "format": "Metadata",
+      "name": "1996-nba-finals-game-3_files.xml",
+      "source": "derivative"
+    },
+    {
+      "format": "Metadata",
+      "name": "1996-nba-finals-game-3_meta.sqlite",
+      "source": "derivative"
+    }
+  ],
+  "metadata": {
+    "description": "The 1996 NBA Finals between the Chicago Bulls and Seattle SuperSonics on NBC.",
+    "identifier": "1996-nba-finals-game-3",
+    "title": "1996 NBA Finals"
+  }
+}
