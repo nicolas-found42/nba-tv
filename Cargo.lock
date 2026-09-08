@@ -2493,8 +2493,10 @@ name = "nbatv_shell"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "nbatv_db",
  "nbatv_player",
  "raw-window-handle",
+ "rusqlite",
  "wry",
 ]
 

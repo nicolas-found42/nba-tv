@@ -1,7 +1,10 @@
-//! In-memory fixture store backing every Shell screen.
+//! Fixture store for tests and offline development (no network, no media).
 //!
 //! 2 seasons, 3 teams (1 defunct), 4 games covering all four tape states.
-//! No network, no media — all data is inline.
+//! The live Shell renders from the archive database through
+//! [`crate::db_store::DbStore`] instead — this store seeds nothing in the
+//! live path; [`FixtureStore::fixture`] exists so view logic stays
+//! unit-testable without a database.
 
 use crate::model::{
     BoxPlayer, BoxScore, BoxTeam, Game, GameType, Season, TapeSource, TapeState, Team,
@@ -33,8 +36,8 @@ pub enum PaletteKind {
     Game,
 }
 
-/// Everything the Shell renders. In production this is fed by `nbatv_db`;
-/// here it is fixed fixtures so all view logic stays unit-testable.
+/// Fixed fixtures for tests and offline development. The live path reads
+/// the archive database instead (see [`crate::db_store::DbStore`]).
 #[derive(Clone, Debug)]
 pub struct FixtureStore {
     seasons: Vec<Season>,

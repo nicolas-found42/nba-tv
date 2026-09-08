@@ -4,6 +4,9 @@ target/
 # Local ingest snapshots (raw HTML/JSON kept so re-normalization never re-fetches)
 data/raw/
 
+# Local archive database (real SQLite archive; rebuilt by ingest, never committed)
+data/archive.db*
+
 # Never commit media
 *.mp4
 *.mkv

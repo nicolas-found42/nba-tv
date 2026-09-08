@@ -588,6 +588,186 @@ pub fn tape_sources_for(conn: &Connection, game_id: &str) -> SqlResult<Vec<TapeS
 }
 
 // ---------------------------------------------------------------------------
+// Reads: the catalog queries the Shell renders through (#19)
+// ---------------------------------------------------------------------------
+//
+// Every list arrives in the order the Shell shows it (seasons oldest-first,
+// games in date order), so the Shell maps rows to its model without
+// re-sorting. Callers degrade to empty on error — an unreadable archive is
+// an empty season list, never a panic.
+
+/// All seasons, oldest first.
+pub fn list_seasons(conn: &Connection) -> SqlResult<Vec<SeasonRow>> {
+    let mut stmt =
+        conn.prepare("SELECT league, year, label FROM seasons ORDER BY year ASC, league ASC")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(SeasonRow {
+            league: row.get(0)?,
+            year: row.get(1)?,
+            label: row.get(2)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// All teams, in slug order.
+pub fn list_teams(conn: &Connection) -> SqlResult<Vec<TeamRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT br_slug, nba_team_id, franchise_id, city, name, abbrev, active_from, active_to
+         FROM teams ORDER BY br_slug ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(TeamRow {
+            br_slug: row.get(0)?,
+            nba_team_id: row.get(1)?,
+            franchise_id: row.get(2)?,
+            city: row.get(3)?,
+            name: row.get(4)?,
+            abbrev: row.get(5)?,
+            active_from: row.get(6)?,
+            active_to: row.get(7)?,
+        })
+    })?;
+    rows.collect()
+}
+
+const GAME_COLS: &str = "game_id, nba_game_id, league, season, date, game_type, \
+    home_team, away_team, home_pts, away_pts, ot, arena, attendance, br_url, sources";
+
+fn game_row_from_row(row: &Row<'_>) -> rusqlite::Result<GameRow> {
+    Ok(GameRow {
+        game_id: row.get(0)?,
+        nba_game_id: row.get(1)?,
+        league: row.get(2)?,
+        season: row.get(3)?,
+        date: row.get(4)?,
+        game_type: row.get(5)?,
+        home_team: row.get(6)?,
+        away_team: row.get(7)?,
+        home_pts: row.get(8)?,
+        away_pts: row.get(9)?,
+        ot: row.get(10)?,
+        arena: row.get(11)?,
+        attendance: row.get(12)?,
+        br_url: row.get(13)?,
+        sources: row.get(14)?,
+    })
+}
+
+/// All games of one season (ending year, e.g. 1947 for 1946-47), in date
+/// order. The `games.sources` JSON column is ingest bookkeeping, not the
+/// live tape path — tape always comes from `tape_sources_for`.
+pub fn games_in_season(conn: &Connection, season: i32) -> SqlResult<Vec<GameRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {GAME_COLS} FROM games WHERE season = ?1 ORDER BY date ASC, game_id ASC"
+    ))?;
+    let rows = stmt.query_map([season], game_row_from_row)?;
+    rows.collect()
+}
+
+/// One game by its Basketball-Reference slug, if archived.
+pub fn game_by_id(conn: &Connection, game_id: &str) -> SqlResult<Option<GameRow>> {
+    let mut stmt = conn.prepare(&format!("SELECT {GAME_COLS} FROM games WHERE game_id = ?1"))?;
+    let mut rows = stmt.query_map([game_id], game_row_from_row)?;
+    match rows.next() {
+        None => Ok(None),
+        Some(row) => row.map(Some),
+    }
+}
+
+fn box_team_from_row(row: &Row<'_>) -> rusqlite::Result<BoxTeamRow> {
+    Ok(BoxTeamRow {
+        game_id: row.get(0)?,
+        team_br: row.get(1)?,
+        mp: row.get(2)?,
+        fg: row.get(3)?,
+        fga: row.get(4)?,
+        fg3: row.get(5)?,
+        fg3a: row.get(6)?,
+        ft: row.get(7)?,
+        fta: row.get(8)?,
+        oreb: row.get(9)?,
+        dreb: row.get(10)?,
+        reb: row.get(11)?,
+        ast: row.get(12)?,
+        stl: row.get(13)?,
+        blk: row.get(14)?,
+        tov: row.get(15)?,
+        pf: row.get(16)?,
+        pts: row.get(17)?,
+        plus_minus: row.get(18)?,
+    })
+}
+
+/// Team totals for one game, in slug order.
+pub fn box_teams_for(conn: &Connection, game_id: &str) -> SqlResult<Vec<BoxTeamRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT game_id, team_br, mp, fg, fga, fg3, fg3a, ft, fta,
+                oreb, dreb, reb, ast, stl, blk, tov, pf, pts, plus_minus
+         FROM box_team WHERE game_id = ?1 ORDER BY team_br ASC",
+    )?;
+    let rows = stmt.query_map([game_id], box_team_from_row)?;
+    rows.collect()
+}
+
+fn box_player_from_row(row: &Row<'_>) -> rusqlite::Result<BoxPlayerRow> {
+    Ok(BoxPlayerRow {
+        game_id: row.get(0)?,
+        team_br: row.get(1)?,
+        player_br: row.get(2)?,
+        starter: row.get(3)?,
+        position: row.get(4)?,
+        mp: row.get(5)?,
+        fg: row.get(6)?,
+        fga: row.get(7)?,
+        fg3: row.get(8)?,
+        fg3a: row.get(9)?,
+        ft: row.get(10)?,
+        fta: row.get(11)?,
+        oreb: row.get(12)?,
+        dreb: row.get(13)?,
+        reb: row.get(14)?,
+        ast: row.get(15)?,
+        stl: row.get(16)?,
+        blk: row.get(17)?,
+        tov: row.get(18)?,
+        pf: row.get(19)?,
+        pts: row.get(20)?,
+        plus_minus: row.get(21)?,
+        dnp_reason: row.get(22)?,
+    })
+}
+
+/// Player totals for one game, grouped by team.
+pub fn box_players_for(conn: &Connection, game_id: &str) -> SqlResult<Vec<BoxPlayerRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT game_id, team_br, player_br, starter, position, mp,
+                fg, fga, fg3, fg3a, ft, fta, oreb, dreb, reb, ast,
+                stl, blk, tov, pf, pts, plus_minus, dnp_reason
+         FROM box_player WHERE game_id = ?1 ORDER BY team_br ASC, player_br ASC",
+    )?;
+    let rows = stmt.query_map([game_id], box_player_from_row)?;
+    rows.collect()
+}
+
+/// Display names for one game's box players, joined to the players
+/// directory. Players with no directory row are absent — callers fall back
+/// to the slug so a missing name never hides the row.
+pub fn player_names_for_game(conn: &Connection, game_id: &str) -> SqlResult<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT players.br_slug, players.name FROM players
+         JOIN box_player ON players.br_slug = box_player.player_br
+         WHERE box_player.game_id = ?1",
+    )?;
+    let rows = stmt.query_map([game_id], |row| {
+        let slug: String = row.get(0)?;
+        let name: String = row.get(1)?;
+        Ok((slug, name))
+    })?;
+    rows.collect()
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -929,5 +1109,146 @@ mod tests {
         bad.game_id = "194611020CHS".to_owned();
         bad.game_type = "EXHIBITION".to_owned();
         assert!(insert_game(&conn, &bad).is_err());
+    }
+
+    #[test]
+    fn catalog_reads_serve_the_shell() {
+        let conn = memdb();
+        insert_season(
+            &conn,
+            &SeasonRow {
+                league: "BAA".to_owned(),
+                year: 1947,
+                label: "1946-47".to_owned(),
+            },
+        )
+        .unwrap();
+        insert_team(
+            &conn,
+            &TeamRow {
+                br_slug: "TRH".to_owned(),
+                nba_team_id: None,
+                franchise_id: None,
+                city: "Toronto".to_owned(),
+                name: "Huskies".to_owned(),
+                abbrev: "TRH".to_owned(),
+                active_from: Some(1946),
+                active_to: Some(1947),
+            },
+        )
+        .unwrap();
+        insert_game(&conn, &first_game()).unwrap();
+        let mut second = first_game();
+        second.game_id = "194611020CHS".to_owned();
+        second.date = "1946-11-02".to_owned();
+        insert_game(&conn, &second).unwrap();
+
+        let seasons = list_seasons(&conn).unwrap();
+        assert_eq!(seasons.len(), 1);
+        assert_eq!(seasons[0].year, 1947);
+
+        let teams = list_teams(&conn).unwrap();
+        assert_eq!(teams.len(), 1);
+        assert_eq!(teams[0].br_slug, "TRH");
+
+        let games = games_in_season(&conn, 1947).unwrap();
+        assert_eq!(games.len(), 2);
+        assert_eq!(games[0].game_id, "194611010TRH");
+        assert!(games_in_season(&conn, 1948).unwrap().is_empty());
+
+        assert_eq!(
+            game_by_id(&conn, "194611010TRH")
+                .unwrap()
+                .map(|g| g.away_team),
+            Some("NYK".to_owned())
+        );
+        assert_eq!(game_by_id(&conn, "000000000AAA").unwrap(), None);
+    }
+
+    #[test]
+    fn box_reads_join_player_names() {
+        let conn = memdb();
+        insert_game(&conn, &first_game()).unwrap();
+        insert_box_team(
+            &conn,
+            &BoxTeamRow {
+                game_id: "194611010TRH".to_owned(),
+                team_br: "NYK".to_owned(),
+                mp: Some("240".to_owned()),
+                fg: Some(22),
+                fga: None,
+                fg3: None,
+                fg3a: None,
+                ft: Some(24),
+                fta: Some(30),
+                oreb: None,
+                dreb: None,
+                reb: None,
+                ast: None,
+                stl: None,
+                blk: None,
+                tov: None,
+                pf: Some(22),
+                pts: Some(68),
+                plus_minus: None,
+            },
+        )
+        .unwrap();
+        insert_box_player(
+            &conn,
+            &BoxPlayerRow {
+                game_id: "194611010TRH".to_owned(),
+                team_br: "NYK".to_owned(),
+                player_br: "ed-so".to_owned(),
+                starter: Some(true),
+                position: Some("C".to_owned()),
+                mp: Some("38:00".to_owned()),
+                fg: Some(7),
+                fga: Some(15),
+                fg3: None,
+                fg3a: None,
+                ft: Some(6),
+                fta: Some(8),
+                oreb: None,
+                dreb: None,
+                reb: None,
+                ast: None,
+                stl: None,
+                blk: None,
+                tov: None,
+                pf: Some(4),
+                pts: Some(20),
+                plus_minus: None,
+                dnp_reason: None,
+            },
+        )
+        .unwrap();
+        insert_player(
+            &conn,
+            &PlayerRow {
+                br_slug: "ed-so".to_owned(),
+                nba_person_id: None,
+                name: "Ed S.".to_owned(),
+                first_season: Some(1947),
+                last_season: Some(1947),
+            },
+        )
+        .unwrap();
+
+        let teams = box_teams_for(&conn, "194611010TRH").unwrap();
+        assert_eq!(teams.len(), 1);
+        assert_eq!(teams[0].pts, Some(68));
+        assert_eq!(teams[0].fga, None);
+        assert!(box_teams_for(&conn, "000000000AAA").unwrap().is_empty());
+
+        let players = box_players_for(&conn, "194611010TRH").unwrap();
+        assert_eq!(players.len(), 1);
+        assert_eq!(players[0].starter, Some(true));
+
+        let names = player_names_for_game(&conn, "194611010TRH").unwrap();
+        assert_eq!(names, vec![("ed-so".to_owned(), "Ed S.".to_owned())]);
+        assert!(player_names_for_game(&conn, "000000000AAA")
+            .unwrap()
+            .is_empty());
     }
 }

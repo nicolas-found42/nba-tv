@@ -4,15 +4,17 @@
 //! view (Box Score always rendered, tape-state banner). ⌘K palette as a
 //! modal popup over teams, seasons, and games.
 //!
-//! All data comes from [`FixtureStore`]; every query the views use is a
-//! pure function on the store, so all navigation logic is unit-testable
-//! without a display. Never construct this in tests with a display —
-//! drive [`ShellApp::navigate`] and the store queries instead.
+//! All data comes from the [`Store`] catalog (the archive database in
+//! production, fixtures in tests/offline dev); every query the views use is
+//! exposed on the store, so all navigation logic is unit-testable without
+//! a display. Never construct this in tests with a display — drive
+//! [`ShellApp::navigate`] and the store queries instead.
 
+use crate::db_store::{DbStore, Store, ARCHIVE_DB_PATH};
 use crate::handover::{dispatch_for, PlayDispatch};
 use crate::model::{cell, TapeState};
 use crate::route::Route;
-use crate::store::{FixtureStore, PaletteKind};
+use crate::store::PaletteKind;
 use eframe::egui;
 use nbatv_player::{EguiTextureStage, FrameToTexture, Pump};
 /// Lane A playback state for the viewed game. Headless-readable via
@@ -33,7 +35,7 @@ pub enum LaneAStatus {
 
 /// The Shell window.
 pub struct ShellApp {
-    store: FixtureStore,
+    store: Store,
     route: Route,
     /// Season dashboard club filter.
     filter: String,
@@ -65,9 +67,52 @@ pub struct ShellApp {
 }
 
 impl ShellApp {
+    /// Live default: open the archive database at [`ARCHIVE_DB_PATH`].
+    /// A missing or unreadable database degrades to an empty in-memory
+    /// archive (empty season list, no crash) — never fixtures.
     pub fn new() -> Self {
+        Self::open_archive(ARCHIVE_DB_PATH)
+    }
+
+    /// Live path used by the binary: open the archive database at `path`,
+    /// creating the schema so an empty file is valid. Any open failure
+    /// logs once and degrades to an empty in-memory archive, never a panic
+    /// and never fixtures.
+    pub fn open_archive(path: impl AsRef<std::path::Path>) -> Self {
+        match DbStore::open(path.as_ref()) {
+            Ok(store) => Self::with_store(Store::Db(store)),
+            Err(err) => {
+                eprintln!(
+                    "archive db: cannot open {} ({err}); running with an empty season list",
+                    path.as_ref().display()
+                );
+                Self::empty()
+            }
+        }
+    }
+
+    /// Hermetic empty archive (no filesystem, no fixtures): pure-logic
+    /// headless tests use this.
+    pub fn empty() -> Self {
+        Self::with_store(Store::Db(DbStore::in_memory()))
+    }
+
+    /// Offline/test path: fixed fixtures, no database. The live path never
+    /// uses this — it seeds nothing outside tests and offline development.
+    pub fn with_fixture() -> Self {
+        Self::with_store(Store::Fixture(crate::store::FixtureStore::fixture()))
+    }
+
+    /// Headless db tests: take ownership of an already-seeded connection
+    /// (callers run `create_schema` plus inserts first; the schema is
+    /// ensured again idempotently here).
+    pub fn from_connection(conn: rusqlite::Connection) -> Self {
+        Self::with_store(Store::Db(DbStore::from_connection(conn)))
+    }
+
+    fn with_store(store: Store) -> Self {
         Self {
-            store: FixtureStore::fixture(),
+            store,
             route: Route::Home,
             filter: String::new(),
             palette_open: false,
@@ -84,6 +129,12 @@ impl ShellApp {
             #[cfg(feature = "lane-b")]
             embed_open_url: None,
         }
+    }
+
+    /// The catalog the views render through (archive db or fixtures).
+    /// Headless tests drive the same queries the views use via this seam.
+    pub fn store(&self) -> &Store {
+        &self.store
     }
 
     pub fn route(&self) -> &Route {
@@ -154,7 +205,7 @@ impl ShellApp {
         let sources = self
             .store
             .game(game_id)
-            .map(|game| game.sources.clone())
+            .map(|game| game.sources)
             .unwrap_or_default();
         let dispatch = dispatch_for(game_id, None, &sources);
         match &dispatch {
@@ -388,7 +439,7 @@ impl ShellApp {
         ui.heading("NBA TV Archive");
         ui.label("Pick a Season to open its dashboard.");
         ui.separator();
-        let seasons: Vec<_> = self.store.seasons().to_vec();
+        let seasons = self.store.seasons();
         for season in seasons {
             let counts = self.store.season_counts(&season.slug);
             let label = format!(
@@ -421,12 +472,7 @@ impl ShellApp {
             ui.label("Filter clubs:");
             ui.text_edit_singleline(&mut self.filter);
         });
-        let teams: Vec<_> = self
-            .store
-            .filter_teams(season, &self.filter)
-            .into_iter()
-            .cloned()
-            .collect();
+        let teams = self.store.filter_teams(season, &self.filter);
         if teams.is_empty() {
             ui.weak("No clubs match this filter.");
             return;
@@ -457,8 +503,6 @@ impl ShellApp {
         ui.weak(format!("Season {}", season));
         ui.separator();
         let (regular, playoffs) = self.store.team_games(season, team);
-        let regular: Vec<crate::model::Game> = regular.into_iter().cloned().collect();
-        let playoffs: Vec<crate::model::Game> = playoffs.into_iter().cloned().collect();
         self.show_ledger(ui, "Regular season", &regular.iter().collect::<Vec<_>>());
         ui.separator();
         self.show_ledger(ui, "Playoffs", &playoffs.iter().collect::<Vec<_>>());
@@ -486,7 +530,7 @@ impl ShellApp {
     }
 
     fn show_game(&mut self, ui: &mut egui::Ui, game_id: &str) {
-        let Some(game) = self.store.game(game_id).cloned() else {
+        let Some(game) = self.store.game(game_id) else {
             ui.heading("Game not found");
             ui.label(format!("No Game with id {game_id}."));
             return;
@@ -564,7 +608,7 @@ impl ShellApp {
         }
         ui.separator();
         // Box Score always renders, even when tape is unavailable.
-        let Some(bx) = self.store.box_for(game_id).cloned() else {
+        let Some(bx) = self.store.box_for(game_id) else {
             ui.weak("Box Score pending.");
             return;
         };
@@ -791,7 +835,7 @@ mod tests {
 
     #[test]
     fn navigate_sets_route_and_closes_palette() {
-        let mut app = ShellApp::new();
+        let mut app = ShellApp::empty();
         assert_eq!(*app.route(), Route::Home);
         app.set_palette_open(true);
         app.navigate(Route::Team {
@@ -810,7 +854,7 @@ mod tests {
 
     #[test]
     fn palette_toggle_clears_query() {
-        let mut app = ShellApp::new();
+        let mut app = ShellApp::empty();
         app.palette_query = "bos".into();
         app.set_palette_open(true);
         assert!(app.palette_query.is_empty());
@@ -819,13 +863,13 @@ mod tests {
 
     #[test]
     fn fresh_app_has_no_dispatch() {
-        let app = ShellApp::new();
+        let app = ShellApp::empty();
         assert_eq!(app.last_dispatch(), None);
     }
 
     #[test]
     fn press_play_on_fixture_game_dispatches_progressive() {
-        let mut app = ShellApp::new();
+        let mut app = ShellApp::with_fixture();
         app.navigate(Route::Game {
             game_id: "194611010TRH".into(),
         });
@@ -841,7 +885,7 @@ mod tests {
 
     #[test]
     fn press_play_with_no_sources_is_honestly_unavailable() {
-        let mut app = ShellApp::new();
+        let mut app = ShellApp::with_fixture();
         app.navigate(Route::Game {
             game_id: "194704160BOS".into(),
         });
@@ -853,7 +897,7 @@ mod tests {
 
     #[test]
     fn press_play_on_pointer_game_shows_pointer() {
-        let mut app = ShellApp::new();
+        let mut app = ShellApp::with_fixture();
         app.navigate(Route::Game {
             game_id: "194711150BOS".into(),
         });
@@ -868,7 +912,7 @@ mod tests {
 
     #[test]
     fn press_play_on_unknown_game_is_unavailable() {
-        let mut app = ShellApp::new();
+        let mut app = ShellApp::with_fixture();
         app.press_play("000000000AAA");
         assert_eq!(app.last_dispatch(), Some(&PlayDispatch::Unavailable));
     }
@@ -876,7 +920,7 @@ mod tests {
     fn navigate_to_another_game_retires_last_dispatch() {
         // Pressing Play on game A then viewing game B must not serve A's
         // embed on B's view: leaving the route retires the outcome.
-        let mut app = ShellApp::new();
+        let mut app = ShellApp::with_fixture();
         app.press_play("194611010TRH");
         assert!(app.last_dispatch().is_some());
         app.navigate(Route::Game {
@@ -889,7 +933,7 @@ mod tests {
     fn same_route_navigation_keeps_last_dispatch() {
         // Re-rendering the same Game view (e.g. ledger Open while already
         // there) must not wipe the just-pressed outcome.
-        let mut app = ShellApp::new();
+        let mut app = ShellApp::with_fixture();
         app.navigate(Route::Game {
             game_id: "194611010TRH".into(),
         });

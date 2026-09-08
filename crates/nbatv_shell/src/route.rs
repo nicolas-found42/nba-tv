@@ -14,7 +14,7 @@
 //! to `Game`, keyed on the trailing segment — the `game_id` is the identity,
 //! the leading segments are context.
 
-use crate::store::FixtureStore;
+use crate::db_store::Store;
 
 /// Shell-owned navigation target.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,7 +85,7 @@ impl Route {
     /// resolve through `store`; unknown slugs fall back to the raw slug so
     /// a bad link still renders a trail. For a Game, the Team crumb is the
     /// home club (navigation context, not a claim about the matchup).
-    pub fn breadcrumbs(&self, store: &FixtureStore) -> Vec<Crumb> {
+    pub fn breadcrumbs(&self, store: &Store) -> Vec<Crumb> {
         let league = Crumb {
             label: "League".to_string(),
             route: Route::Home,
@@ -154,10 +154,11 @@ impl Route {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db_store::Store;
     use crate::store::FixtureStore;
 
-    fn store() -> FixtureStore {
-        FixtureStore::fixture()
+    fn store() -> Store {
+        Store::Fixture(FixtureStore::fixture())
     }
 
     #[test]

@@ -7,7 +7,7 @@ use nbatv_shell::{PlayDispatch, Route, ShellApp};
 
 #[test]
 fn play_on_progressive_game_starts_lane_a_session() {
-    let mut app = ShellApp::new();
+    let mut app = ShellApp::with_fixture();
     app.navigate(Route::Game {
         game_id: "194611010TRH".into(),
     });
@@ -27,7 +27,7 @@ fn play_on_progressive_game_starts_lane_a_session() {
 
 #[test]
 fn lane_a_session_retires_on_navigate() {
-    let mut app = ShellApp::new();
+    let mut app = ShellApp::with_fixture();
     app.press_play("194611010TRH");
     app.navigate(Route::Game {
         game_id: "194704160BOS".into(),
@@ -40,9 +40,11 @@ fn lane_a_session_retires_on_navigate() {
 
 #[test]
 fn non_progressive_play_retires_lane_a() {
-    let mut app = ShellApp::new();
+    let mut app = ShellApp::with_fixture();
+    // Start a real progressive session, then press Play on the pointer
+    // game: the non-progressive dispatch must retire the live session
+    // (no decodable bytes, so no Lane A session may survive).
     app.press_play("194611010TRH");
-    // Pointer game: no decodable bytes, so no Lane A session may survive.
     app.press_play("194711150BOS");
     assert!(app.lane_a_status().is_none());
 }
@@ -108,7 +110,7 @@ fn lane_a_decodes_any_native_size_to_the_end() {
     let mp4 = make_synth_mp4(&dir);
     let src = mp4.to_string_lossy().into_owned();
 
-    let mut app = ShellApp::new();
+    let mut app = ShellApp::empty();
     app.begin_lane_a(src);
     assert!(matches!(
         app.lane_a_status(),
@@ -127,7 +129,7 @@ fn lane_a_reports_undecodable_src_honestly() {
         println!("SKIP lane_a_reports_undecodable_src_honestly: ffmpeg not installed");
         return;
     }
-    let mut app = ShellApp::new();
+    let mut app = ShellApp::empty();
     app.begin_lane_a("/nonexistent/nbatv-no-such-tape.mp4".to_string());
     // Spawn succeeds; the failure surfaces on the first pull, fast, with
     // no network and no panic.
@@ -141,7 +143,7 @@ fn lane_a_reports_undecodable_src_honestly() {
 
 #[test]
 fn lane_a_pause_holds_and_resume_continues() {
-    let mut app = ShellApp::new();
+    let mut app = ShellApp::empty();
     app.begin_lane_a("/nonexistent/nbatv-pause-probe.mp4".to_string());
     app.set_lane_a_paused(true);
     assert_eq!(app.lane_a_status(), Some(&nbatv_shell::LaneAStatus::Paused));
@@ -163,7 +165,7 @@ fn lane_a_restart_replays_from_zero() {
     let mp4 = make_synth_mp4(&dir);
     let src = mp4.to_string_lossy().into_owned();
 
-    let mut app = ShellApp::new();
+    let mut app = ShellApp::empty();
     app.begin_lane_a(src);
     let _ = app.advance_lane_a();
     assert!(app.lane_a_frames_converted() >= 1);

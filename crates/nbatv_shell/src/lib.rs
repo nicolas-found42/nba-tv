@@ -1,15 +1,19 @@
 //! `nbatv_shell`: the app window and all browse screens.
 //!
 //! Shell-owned [`route::Route`]: Home → Season dashboard → Team → Game.
-//! Backed by an in-memory [`store::FixtureStore`]; no network, no media.
+//! Backed by the archive database through [`db_store::DbStore`] (opened at
+//! [`db_store::ARCHIVE_DB_PATH`]); the fixture store remains for tests and
+//! offline development only. No network, no media.
 
 pub mod app;
+pub mod db_store;
 pub mod embed;
 pub mod handover;
 pub mod model;
 pub mod route;
 pub mod store;
 pub use app::{LaneAStatus, ShellApp};
+pub use db_store::{DbStore, Store, ARCHIVE_DB_PATH};
 pub use embed::{
     cue_snippet, embed_url_for, is_sanctioned_embed, EmbedBounds, EmbedError, EmbedHost,
 };
