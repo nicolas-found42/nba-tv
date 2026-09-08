@@ -22,5 +22,6 @@ pub use model::{
     cell, playback_class_for_rank, BoxPlayer, BoxScore, BoxTeam, Game, GameType, PlaybackClass,
     Season, TapeSource, TapeState, Team,
 };
+pub use nbatv_catalog::{ReviewItem, SweepStatus};
 pub use route::{Crumb, ParseError, Route};
 pub use store::{FixtureStore, PaletteItem, PaletteKind, SeasonCounts};

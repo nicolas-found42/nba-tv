@@ -1,0 +1,13 @@
+[package]
+name = "nbatv_catalog"
+version = "0.1.0"
+edition = "2021"
+description = "TapeCatalog sweep engine: SourceProbe port, scorer, politeness, game-query evidence"
+license = "MIT"
+
+[dependencies]
+nbatv_db = { path = "../nbatv_db", version = "0.1.0" }
+nbatv_ladder = { path = "../nbatv_ladder", version = "0.1.0" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+[lints]
+workspace = true

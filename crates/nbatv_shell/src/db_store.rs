@@ -16,20 +16,27 @@
 //! - Season slugs derive from the ending year alone (`1947` → `1946-47`),
 //!   so two leagues sharing a year would share a slug and their games mix
 //!   under it. The current archive is single-league.
-//! - List views fetch one `tape_sources` query per game. Local SQLite makes
-//!   this trivial at archive scale; a later slice can batch it.
+//! - List views fetch one `tape_sources` plus one sweep-status query per
+//!   game. Local SQLite makes this trivial at archive scale; a later slice
+//!   can batch it.
 //! - `NBA_CUP` games skate in the Regular-season ledger (they count as
 //!   regular-season games bar the final).
+//! - Tape banners derive from stored sweep evidence (`game_queries` plus
+//!   `tape_sources`, see `nbatv_catalog`): a game with stream tape rows is
+//!   Playable whatever the query history says; otherwise the stored sweep
+//!   verdict rules (Sweeping / Unavailable / pointer-only).
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use crate::model::{
-    playback_class_for_rank, BoxPlayer, BoxScore, BoxTeam, Game, GameType, PlaybackClass, Season,
-    TapeSource, TapeState, Team,
+    BoxPlayer, BoxScore, BoxTeam, Game, GameType, Season, TapeSource, TapeState, Team,
 };
 use crate::route::Route;
 use crate::store::{FixtureStore, PaletteItem, PaletteKind, SeasonCounts};
+use nbatv_catalog::{
+    review_list as catalog_review_list, sweep_status_for, ReviewItem, SweepStatus,
+};
 
 /// Workspace-relative path of the live archive database, resolved against
 /// the process working directory (the workspace root in development).
@@ -133,7 +140,8 @@ impl DbStore {
     pub fn game(&self, game_id: &str) -> Option<Game> {
         let row = nbatv_db::game_by_id(&self.conn, game_id).unwrap_or_default()?;
         let sources = self.tape_sources(game_id);
-        Some(game_with_tape(row, sources))
+        let tape = tape_state_for_game(&self.conn, game_id, &sources);
+        Some(game_with_tape(row, sources, tape))
     }
 
     /// All games of one Season's Schedule, in date order.
@@ -146,9 +154,24 @@ impl DbStore {
             .into_iter()
             .map(|row| {
                 let sources = self.tape_sources(&row.game_id);
-                game_with_tape(row, sources)
+                let tape = tape_state_for_game(&self.conn, &row.game_id, &sources);
+                game_with_tape(row, sources, tape)
             })
             .collect()
+    }
+
+    /// Stored sweep verdict for one game (Playable / Sweeping / Unavailable
+    /// / Exists-not-streamable), derived live from `game_queries` plus
+    /// `tape_sources`. Degrades to Sweeping on error — an unreadable sweep
+    /// keeps looking, never claims absence.
+    pub fn sweep_status(&self, game_id: &str) -> SweepStatus {
+        sweep_status_for(&self.conn, game_id).unwrap_or(SweepStatus::Sweeping)
+    }
+
+    /// REVIEW candidates for one game, in rung order: the Game view's
+    /// review card. Degrades to empty on error.
+    pub fn review_list(&self, game_id: &str) -> Vec<ReviewItem> {
+        catalog_review_list(&self.conn, game_id).unwrap_or_default()
     }
 
     /// Clubs on a Season dashboard: every club whose span covers the
@@ -426,6 +449,23 @@ impl Store {
             Store::Db(s) => s.palette_search(query),
         }
     }
+
+    pub fn sweep_status(&self, game_id: &str) -> SweepStatus {
+        match self {
+            Store::Fixture(s) => s
+                .game(game_id)
+                .map(sweep_status_for_fixture)
+                .unwrap_or(SweepStatus::Sweeping),
+            Store::Db(s) => s.sweep_status(game_id),
+        }
+    }
+
+    pub fn review_list(&self, game_id: &str) -> Vec<ReviewItem> {
+        match self {
+            Store::Fixture(_) => Vec::new(),
+            Store::Db(s) => s.review_list(game_id),
+        }
+    }
 }
 
 /// Season slug (`1946-47`) for an archive ending year (`1947`).
@@ -450,19 +490,46 @@ fn display_label(db_label: &str) -> String {
     db_label.replace('-', "–")
 }
 
-/// Tape availability from the best (lowest) ladder rank present, mirroring
-/// the fixture semantics: a progressive best is playable, an external
-/// best is still sweeping, a pointer best is pointer-only, and no rows
-/// means unavailable. Unknown rungs resolve to pointer-only, matching
-/// dispatch (which shows them as pointers).
-fn tape_state_for_best(best: Option<u8>) -> TapeState {
-    match best {
-        None => TapeState::Unavailable,
-        Some(rank) => match playback_class_for_rank(rank) {
-            Some(PlaybackClass::ProgressiveFile) => TapeState::Playable,
-            Some(PlaybackClass::ExternalSurface) => TapeState::Sweeping,
-            Some(PlaybackClass::Pointer) | None => TapeState::Pointer,
+/// Tape availability for one game: verified stream rows are ground truth —
+/// tape exists and Play dispatch plays it, whatever the query history says
+/// (hand-seeded and pre-sweep rows stay honest) — otherwise the derived
+/// sweep verdict rules: an unconsumed ladder is Sweeping, a fully recorded
+/// empty sweep is Unavailable, and pointer-only rows with no sweep history
+/// are pointer-only. A Playable verdict with no stream rows degrades to
+/// Sweeping (stale win, keep looking) rather than showing Play with
+/// nothing to play. One tape_sources read plus one game_queries read per
+/// game: the rows are preloaded once and the verdict derived from them.
+fn tape_state_for_game(
+    conn: &rusqlite::Connection,
+    game_id: &str,
+    sources: &[TapeSource],
+) -> TapeState {
+    if sources.iter().any(|s| s.rank <= 4) {
+        return TapeState::Playable;
+    }
+    // Past the early return every row is rung 5+, so any row at all means
+    // pointer-only.
+    let queries = nbatv_db::game_queries_for(conn, game_id).unwrap_or_default();
+    match nbatv_catalog::sweep_status_from(game_id, queries, !sources.is_empty()) {
+        SweepStatus::Playable { .. } => TapeState::Sweeping,
+        SweepStatus::Sweeping => TapeState::Sweeping,
+        SweepStatus::Unavailable { .. } => TapeState::Unavailable,
+        SweepStatus::ExistsNotStreamable => TapeState::Pointer,
+    }
+}
+
+/// Fixture games carry their verdict directly: map it onto the sweep
+/// vocabulary so the [`Store`] seam reads uniformly.
+fn sweep_status_for_fixture(game: &Game) -> SweepStatus {
+    match game.tape {
+        TapeState::Playable => SweepStatus::Playable {
+            rank: game.sources.iter().map(|s| s.rank).min().unwrap_or(0),
         },
+        TapeState::Sweeping => SweepStatus::Sweeping,
+        TapeState::Unavailable => SweepStatus::Unavailable {
+            consumed_label: format!("ladder consumed {}", game.game_id),
+        },
+        TapeState::Pointer => SweepStatus::ExistsNotStreamable,
     }
 }
 
@@ -477,8 +544,7 @@ fn convert_tape_source(row: nbatv_db::TapeSource) -> TapeSource {
     }
 }
 
-fn game_with_tape(row: nbatv_db::GameRow, sources: Vec<TapeSource>) -> Game {
-    let best = sources.iter().map(|s| s.rank).min();
+fn game_with_tape(row: nbatv_db::GameRow, sources: Vec<TapeSource>, tape: TapeState) -> Game {
     Game {
         game_id: row.game_id,
         season: season_slug(row.season),
@@ -492,7 +558,7 @@ fn game_with_tape(row: nbatv_db::GameRow, sources: Vec<TapeSource>) -> Game {
         away_team: row.away_team,
         home_pts: u32::try_from(row.home_pts).unwrap_or(0),
         away_pts: u32::try_from(row.away_pts).unwrap_or(0),
-        tape: tape_state_for_best(best),
+        tape,
         sources,
     }
 }
@@ -565,14 +631,95 @@ mod tests {
         assert_eq!(season_year("nope"), None);
     }
 
+    fn memdb() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory archive db");
+        nbatv_db::create_schema(&conn).expect("create_schema");
+        conn
+    }
+
+    fn stream_source(rank: u8) -> TapeSource {
+        TapeSource {
+            game_id: "194611010TRH".to_owned(),
+            rank,
+            source_class: "internet-archive".to_owned(),
+            url_or_pointer: "https://archive.org/details/x".to_owned(),
+            match_confidence: 1.0,
+            verified_at: "2026-01-01".to_owned(),
+        }
+    }
+
+    fn sweep_query(rung: u8, level: &str) -> nbatv_db::GameQuery {
+        nbatv_db::GameQuery {
+            game_id: "194611010TRH".to_owned(),
+            rung,
+            query_text: format!("query for rung {rung}"),
+            queried_at: "2026-01-01".to_owned(),
+            best_match_level: level.to_owned(),
+            review_url: None,
+            review_title: None,
+        }
+    }
+
     #[test]
-    fn tape_state_mirrors_fixture_semantics() {
-        assert_eq!(tape_state_for_best(None), TapeState::Unavailable);
-        assert_eq!(tape_state_for_best(Some(1)), TapeState::Playable);
-        assert_eq!(tape_state_for_best(Some(4)), TapeState::Playable);
-        assert_eq!(tape_state_for_best(Some(2)), TapeState::Sweeping);
-        assert_eq!(tape_state_for_best(Some(6)), TapeState::Pointer);
-        assert_eq!(tape_state_for_best(Some(9)), TapeState::Pointer);
+    fn tape_state_prefers_stream_rows_then_stored_verdict() {
+        let conn = memdb();
+        // Verified stream rows win whatever the query history says.
+        assert_eq!(
+            tape_state_for_game(&conn, "194611010TRH", &[stream_source(1)]),
+            TapeState::Playable
+        );
+        // No rows, no history: still sweeping, never absent.
+        assert_eq!(
+            tape_state_for_game(&conn, "194611010TRH", &[]),
+            TapeState::Sweeping
+        );
+        // Fully recorded empty sweep: unavailable.
+        for rung in 0u8..=4 {
+            nbatv_db::upsert_game_query(&conn, &sweep_query(rung, "reject")).unwrap();
+        }
+        assert_eq!(
+            tape_state_for_game(&conn, "194611010TRH", &[]),
+            TapeState::Unavailable
+        );
+    }
+
+    #[test]
+    fn playable_verdict_without_stream_rows_degrades_to_sweeping() {
+        let conn = memdb();
+        // A recorded LIKELY win with zero tape rows is a stale win: the
+        // state must not offer Play with nothing to play.
+        nbatv_db::upsert_game_query(&conn, &sweep_query(1, "likely")).unwrap();
+        assert_eq!(
+            tape_state_for_game(&conn, "194611010TRH", &[]),
+            TapeState::Sweeping
+        );
+    }
+
+    #[test]
+    fn tape_state_maps_pointer_only_sweeps_to_pointer() {
+        let conn = memdb();
+        // Mirror the real call path: the slice and the db agree, because
+        // callers load sources from the same connection.
+        nbatv_db::insert_tape_source(
+            &conn,
+            &nbatv_db::TapeSource {
+                game_id: "194611010TRH".to_owned(),
+                rank: 5,
+                source_class: "collector-catalogs".to_owned(),
+                url_or_pointer: "pointer:collector/x".to_owned(),
+                match_confidence: 1.0,
+                verified_at: "2026-01-01".to_owned(),
+            },
+        )
+        .unwrap();
+        let pointer = TapeSource {
+            rank: 5,
+            ..stream_source(5)
+        };
+        assert_eq!(
+            tape_state_for_game(&conn, "194611010TRH", &[pointer]),
+            TapeState::Pointer
+        );
     }
 
     #[test]

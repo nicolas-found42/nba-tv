@@ -1,10 +1,16 @@
-# ADR 0001 — One workspace, five crates, pure Rust
+# ADR 0001 — One workspace, six crates, pure Rust
 
 Date: 2026-09-07 · Map nicolas-found42/nba-tv#1 (decisions #2/#3/#5)
 
+Amended 2026-09-08: `nbatv_catalog` joins as the sixth crate (issue #18's
+sweep pipeline: SourceProbe port, TapeCatalog orchestration) — same purity
+rule, same ownership pattern; the shell consumes it for sweep verdicts and
+the review list.
+
 ## Context
 
-The app has five separable jobs (store, ingest, browse, play, find tape) that
+The app has six separable jobs (store, ingest, browse, play, find tape,
+sweep sources for tape) that
 share vocabulary (Season, Team, Game, Schedule, Box Score, Game Tape) and
 contract types (`game_id` as the Basketball-Reference box-score slug;
 `tape_sources(game_id, rank, source_class, url_or_pointer, match_confidence,
@@ -14,10 +20,11 @@ enrichment for Schedule and Box Score (#3), two playback lanes (#5/#10).
 
 ## Decision
 
-One Cargo workspace, five crates: `nbatv_db`, `nbatv_ingest`, `nbatv_shell`,
-`nbatv_player`, `nbatv_ladder` (ownership per README layout table). One
-`resolver = "2"` workspace, shared `[workspace.lints]`, no `default-run`
-(no flagship binary yet — the Shell binary arrives with its crate).
+One Cargo workspace, six crates: `nbatv_db`, `nbatv_ingest`, `nbatv_shell`,
+`nbatv_player`, `nbatv_ladder`, `nbatv_catalog` (ownership per README
+layout table). One `resolver = "2"` workspace, shared `[workspace.lints]`,
+no `default-run` (no flagship binary yet — the Shell binary arrives with
+its crate).
 
 Workspace code is **pure Rust**. Exactly two exceptions, both at the process
 boundary, never as linked C in workspace code:

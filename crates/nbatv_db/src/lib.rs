@@ -1,9 +1,10 @@
 //! SQLite storage for the nba-tv personal NBA archive.
 //!
 //! Schema mirrors the batch contract: `seasons`, `teams`, `players`,
-//! `games`, `box_team`, `box_player`, `player_season_totals`, plus
-//! `tape_sources`. The `game_id` primary key is the Basketball-Reference
-//! box-score slug (e.g. `194611010TRH`).
+//! `games`, `box_team`, `box_player`, `player_season_totals`,
+//! `tape_sources`, plus `game_queries` (TapeCatalog sweep evidence). The
+//! `game_id` primary key is the Basketball-Reference box-score slug (e.g.
+//! `194611010TRH`).
 //!
 //! Era rule: box-score columns for stats the era did not record are
 //! NULLABLE. NULL means "era did not record" and the UI renders "—".
@@ -95,6 +96,23 @@ impl TapeSource {
     pub fn playback_class(&self) -> Option<PlaybackClass> {
         PlaybackClass::of_rank(self.rank)
     }
+}
+
+/// One recorded outbound sweep query for a game rung (TapeCatalog evidence,
+/// issue #20). One row per `(game_id, rung)`: a re-sweep replaces the stale
+/// row, so restart resumes from what is stored. `best_match_level` is one
+/// of `confirmed|likely|review|reject`. `review_url`/`review_title` carry
+/// the top REVIEW candidate evidence when `best_match_level` is `review`
+/// (else NULL); REVIEW rows never become `tape_sources`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameQuery {
+    pub game_id: String,
+    pub rung: u8,
+    pub query_text: String,
+    pub queried_at: String,
+    pub best_match_level: String,
+    pub review_url: Option<String>,
+    pub review_title: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -242,7 +260,7 @@ pub struct SeasonTotalRow {
 // Schema
 // ---------------------------------------------------------------------------
 
-/// Create all 8 archive tables. Idempotent (`IF NOT EXISTS`).
+/// Create all 9 archive tables. Idempotent (`IF NOT EXISTS`).
 pub fn create_schema(conn: &Connection) -> SqlResult<()> {
     conn.execute_batch(
         "
@@ -366,6 +384,17 @@ pub fn create_schema(conn: &Connection) -> SqlResult<()> {
             match_confidence  REAL NOT NULL,
             verified_at       TEXT NOT NULL,
             PRIMARY KEY (game_id, rank)
+        );
+        CREATE TABLE IF NOT EXISTS game_queries (
+            game_id          TEXT NOT NULL,
+            rung             INTEGER NOT NULL,
+            query_text       TEXT NOT NULL,
+            queried_at       TEXT NOT NULL,
+            best_match_level TEXT NOT NULL
+                             CHECK (best_match_level IN ('confirmed','likely','review','reject')),
+            review_url       TEXT NULL,
+            review_title     TEXT NULL,
+            PRIMARY KEY (game_id, rung)
         );
         ",
     )
@@ -587,6 +616,89 @@ pub fn tape_sources_for(conn: &Connection, game_id: &str) -> SqlResult<Vec<TapeS
     rows.collect()
 }
 
+/// Record one sweep query, replacing the stale row for `(game_id, rung)`
+/// when the rung is re-swept after the rescan window.
+pub fn upsert_game_query(conn: &Connection, q: &GameQuery) -> SqlResult<()> {
+    conn.execute(
+        "INSERT INTO game_queries
+            (game_id, rung, query_text, queried_at, best_match_level, review_url, review_title)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT (game_id, rung) DO UPDATE SET
+            query_text = excluded.query_text,
+            queried_at = excluded.queried_at,
+            best_match_level = excluded.best_match_level,
+            review_url = excluded.review_url,
+            review_title = excluded.review_title",
+        rusqlite::params![
+            q.game_id,
+            q.rung,
+            q.query_text,
+            q.queried_at,
+            q.best_match_level,
+            q.review_url,
+            q.review_title
+        ],
+    )?;
+    Ok(())
+}
+
+fn game_query_from_row(row: &Row<'_>) -> rusqlite::Result<GameQuery> {
+    Ok(GameQuery {
+        game_id: row.get(0)?,
+        rung: row.get(1)?,
+        query_text: row.get(2)?,
+        queried_at: row.get(3)?,
+        best_match_level: row.get(4)?,
+        review_url: row.get(5)?,
+        review_title: row.get(6)?,
+    })
+}
+
+/// All recorded sweep queries for a game, in rung order.
+pub fn game_queries_for(conn: &Connection, game_id: &str) -> SqlResult<Vec<GameQuery>> {
+    let mut stmt = conn.prepare(
+        "SELECT game_id, rung, query_text, queried_at, best_match_level, review_url, review_title
+         FROM game_queries WHERE game_id = ?1 ORDER BY rung ASC",
+    )?;
+    let rows = stmt.query_map([game_id], game_query_from_row)?;
+    rows.collect()
+}
+
+/// All recorded sweep queries across games, in game then rung order (backs
+/// the catalog's all-games review list).
+pub fn game_queries_all(conn: &Connection) -> SqlResult<Vec<GameQuery>> {
+    let mut stmt = conn.prepare(
+        "SELECT game_id, rung, query_text, queried_at, best_match_level, review_url, review_title
+         FROM game_queries ORDER BY game_id ASC, rung ASC",
+    )?;
+    let rows = stmt.query_map([], game_query_from_row)?;
+    rows.collect()
+}
+
+/// Record-or-replace one ranked tape source: a re-sweep that re-verifies a
+/// rung refreshes its row instead of failing on the primary key.
+pub fn upsert_tape_source(conn: &Connection, t: &TapeSource) -> SqlResult<()> {
+    conn.execute(
+        "INSERT INTO tape_sources
+            (game_id, rank, source_class, url_or_pointer, match_confidence, verified_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT (game_id, rank) DO UPDATE SET
+            source_class = excluded.source_class,
+            url_or_pointer = excluded.url_or_pointer,
+            match_confidence = excluded.match_confidence,
+            verified_at = excluded.verified_at",
+        rusqlite::params![
+            t.game_id,
+            t.rank,
+            t.source_class,
+            t.url_or_pointer,
+            t.match_confidence,
+            t.verified_at
+        ],
+    )?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Reads: the catalog queries the Shell renders through (#19)
 // ---------------------------------------------------------------------------
@@ -803,7 +915,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_creates_all_eight_tables() {
+    fn schema_creates_all_nine_tables() {
         let conn = memdb();
         let mut names: Vec<String> = conn
             .prepare(
@@ -822,6 +934,7 @@ mod tests {
             vec![
                 "box_player",
                 "box_team",
+                "game_queries",
                 "games",
                 "player_season_totals",
                 "players",
@@ -1250,5 +1363,100 @@ mod tests {
         assert!(player_names_for_game(&conn, "000000000AAA")
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn game_queries_round_trip_in_rung_order() {
+        let conn = memdb();
+        for (rung, level) in [(2u8, "likely"), (0u8, "reject")] {
+            upsert_game_query(
+                &conn,
+                &GameQuery {
+                    game_id: "194611010TRH".to_owned(),
+                    rung,
+                    query_text: format!("query for rung {rung}"),
+                    queried_at: "2026-01-01".to_owned(),
+                    best_match_level: level.to_owned(),
+                    review_url: None,
+                    review_title: None,
+                },
+            )
+            .unwrap();
+        }
+        let queries = game_queries_for(&conn, "194611010TRH").unwrap();
+        assert_eq!(queries.len(), 2);
+        assert_eq!(queries[0].rung, 0, "queries arrive in rung order");
+        assert_eq!(queries[1].rung, 2);
+        assert_eq!(queries[1].best_match_level, "likely");
+        assert!(game_queries_for(&conn, "000000000AAA").unwrap().is_empty());
+    }
+
+    #[test]
+    fn game_query_upsert_replaces_the_stale_row() {
+        let conn = memdb();
+        let query = |at: &str, level: &str| GameQuery {
+            game_id: "194611010TRH".to_owned(),
+            rung: 1,
+            query_text: "ia sweep".to_owned(),
+            queried_at: at.to_owned(),
+            best_match_level: level.to_owned(),
+            review_url: None,
+            review_title: None,
+        };
+        upsert_game_query(&conn, &query("2026-01-01", "reject")).unwrap();
+        upsert_game_query(&conn, &query("2026-04-02", "likely")).unwrap();
+        let queries = game_queries_for(&conn, "194611010TRH").unwrap();
+        assert_eq!(queries.len(), 1, "a rescan replaces, never duplicates");
+        assert_eq!(queries[0].queried_at, "2026-04-02");
+        assert_eq!(queries[0].best_match_level, "likely");
+    }
+
+    #[test]
+    fn game_query_carries_review_evidence_and_rejects_bad_levels() {
+        let conn = memdb();
+        upsert_game_query(
+            &conn,
+            &GameQuery {
+                game_id: "194611010TRH".to_owned(),
+                rung: 2,
+                query_text: "youtube sweep".to_owned(),
+                queried_at: "2026-01-01".to_owned(),
+                best_match_level: "review".to_owned(),
+                review_url: Some("https://example.com/clip".to_owned()),
+                review_title: Some("NYK highlights".to_owned()),
+            },
+        )
+        .unwrap();
+        let queries = game_queries_for(&conn, "194611010TRH").unwrap();
+        assert_eq!(
+            queries[0].review_url.as_deref(),
+            Some("https://example.com/clip")
+        );
+        let bad = GameQuery {
+            best_match_level: "maybe".to_owned(),
+            ..queries[0].clone()
+        };
+        assert!(
+            upsert_game_query(&conn, &bad).is_err(),
+            "levels outside confirmed|likely|review|reject are rejected"
+        );
+    }
+
+    #[test]
+    fn tape_source_upsert_refreshes_the_verified_row() {
+        let conn = memdb();
+        let source = |at: &str| TapeSource {
+            game_id: "194611010TRH".to_owned(),
+            rank: 1,
+            source_class: "internet-archive".to_owned(),
+            url_or_pointer: "https://archive.org/details/194611010TRH".to_owned(),
+            match_confidence: 1.0,
+            verified_at: at.to_owned(),
+        };
+        upsert_tape_source(&conn, &source("2026-01-01")).unwrap();
+        upsert_tape_source(&conn, &source("2026-04-02")).unwrap();
+        let tapes = tape_sources_for(&conn, "194611010TRH").unwrap();
+        assert_eq!(tapes.len(), 1);
+        assert_eq!(tapes[0].verified_at, "2026-04-02");
     }
 }

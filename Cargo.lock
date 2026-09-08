@@ -2466,6 +2466,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nbatv_catalog"
+version = "0.1.0"
+dependencies = [
+ "nbatv_db",
+ "nbatv_ladder",
+ "rusqlite",
+]
+
+[[package]]
 name = "nbatv_db"
 version = "0.1.0"
 dependencies = [
@@ -2493,6 +2502,7 @@ name = "nbatv_shell"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "nbatv_catalog",
  "nbatv_db",
  "nbatv_player",
  "raw-window-handle",

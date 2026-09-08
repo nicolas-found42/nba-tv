@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/nbatv_catalog",
     "crates/nbatv_db",
     "crates/nbatv_ingest",
     "crates/nbatv_shell",

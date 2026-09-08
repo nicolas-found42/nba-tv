@@ -606,6 +606,25 @@ impl ShellApp {
             }
             None => {}
         }
+        // REVIEW candidates surface here and only here: they never become
+        // tape rows and dispatch never sees them.
+        let reviews = self.store.review_list(game_id);
+        if !reviews.is_empty() {
+            ui.separator();
+            ui.strong(format!(
+                "Needs review — {} candidate{} (never auto-plays)",
+                reviews.len(),
+                if reviews.len() == 1 { "" } else { "s" }
+            ));
+            for item in &reviews {
+                ui.monospace(format!(
+                    "rung {} {} — {}",
+                    item.rung, item.rung_name, item.title
+                ));
+                ui.monospace(&item.url_or_pointer);
+            }
+            ui.weak("These candidates need a human look before they can play.");
+        }
         ui.separator();
         // Box Score always renders, even when tape is unavailable.
         let Some(bx) = self.store.box_for(game_id) else {
