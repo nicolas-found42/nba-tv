@@ -68,11 +68,9 @@
 //!
 use crate::politeness::PolitenessConfig;
 use crate::probe::{GameContext, ProbeCandidate, ProbeOutcome, SourceProbe};
-use crate::scorer::score_candidate;
 use nbatv_ladder::YoutubeQuota;
 use std::process::Command;
 use std::time::Duration;
-
 /// Longest-original wins, but never more than two items per probe call:
 /// one search plus up to two metadata fetches bounds a call at 3 requests.
 const MAX_METADATA_FETCHES: usize = 2;

@@ -164,6 +164,7 @@ pub struct ScriptedProbe {
     outcome: ProbeOutcome,
     calls: Cell<usize>,
     last_politeness: RefCell<Option<PolitenessConfig>>,
+    last_quota_remaining: RefCell<Option<u32>>,
 }
 
 impl ScriptedProbe {
@@ -174,7 +175,15 @@ impl ScriptedProbe {
             outcome,
             calls: Cell::new(0),
             last_politeness: RefCell::new(None),
+            last_quota_remaining: RefCell::new(None),
         }
+    }
+
+    /// The YouTube budget remaining at the most recent call, if any: two
+    /// probes reporting the same value shared one quota (the runner's
+    /// one-quota-per-run shape).
+    pub fn last_quota_remaining(&self) -> Option<u32> {
+        *self.last_quota_remaining.borrow()
     }
 
     /// How many times the sweep called this probe.
@@ -201,10 +210,11 @@ impl SourceProbe for ScriptedProbe {
         &self,
         _game: &GameContext,
         politeness: &PolitenessConfig,
-        _quota: &mut YoutubeQuota,
+        quota: &mut YoutubeQuota,
     ) -> ProbeOutcome {
         self.calls.set(self.calls.get() + 1);
         *self.last_politeness.borrow_mut() = Some(politeness.clone());
+        *self.last_quota_remaining.borrow_mut() = Some(quota.remaining());
         self.outcome.clone()
     }
 }

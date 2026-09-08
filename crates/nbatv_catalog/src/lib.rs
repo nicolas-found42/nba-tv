@@ -20,6 +20,7 @@ pub mod nba_probe;
 pub mod politeness;
 pub mod probe;
 pub mod rung4_probe;
+pub mod runner;
 pub mod scorer;
 pub mod sweep;
 pub mod ytdlp_probe;
@@ -27,6 +28,11 @@ pub mod ytdlp_probe;
 pub use drive::{
     drive_sign_in_prompt, mirror_ready_entries, MirrorConfig, MirrorEntry, MirrorError,
     MirrorOutcome, MirrorReport, RcloneMirror, RcloneOutput,
+};
+pub use runner::{
+    ending_year_to_slug, expand_season_range, parse_argv, run_backfill, season_slug_to_ending_year,
+    usage, BackfillConfig, BackfillPorts, BackfillReport, RunnerArgs, RunnerError, DEFAULT_DB_PATH,
+    DEFAULT_MANIFEST_PATH, DEFAULT_MAX_RETRIES, EXIT_OK, EXIT_RUN, EXIT_USAGE,
 };
 
 pub use fetch::{

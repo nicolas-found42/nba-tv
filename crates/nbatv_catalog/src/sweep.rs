@@ -30,12 +30,15 @@ use nbatv_ladder::exhaustion::{
 use nbatv_ladder::{Rung, YoutubeQuota};
 use rusqlite::{Connection, Result as SqlResult};
 
-/// What one sweep did: the derived verdict plus the rungs actually probed
-/// (fresh-window skips and deferred rungs are absent).
+/// What one sweep did: the derived verdict, the rungs actually probed
+/// (fresh-window skips are absent), and the rungs that deferred — a
+/// deferred rung recorded nothing and retries next sweep, so callers must
+/// not treat it like a rescan-window skip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SweepReport {
     pub status: SweepStatus,
     pub probed: Vec<u8>,
+    pub deferred: Vec<u8>,
 }
 
 /// Sweep failure: an unparseable caller timestamp, or a database error.
@@ -129,9 +132,10 @@ pub fn sweep_game(
             .into_iter()
             .map(|row| (row.rung, row))
             .collect();
+    let mut probed: Vec<u8> = Vec::new();
+    let mut deferred: Vec<u8> = Vec::new();
 
     let mut evals: Vec<RungEvaluation> = Vec::with_capacity(5);
-    let mut probed: Vec<u8> = Vec::new();
 
     for rung in 0u8..=4 {
         // Fresh rows inside the rung's rescan window resume without
@@ -157,6 +161,7 @@ pub fn sweep_game(
         if outcome.deferred {
             // The query could not run: record nothing so the rung retries
             // next sweep instead of burning the rescan window.
+            deferred.push(rung);
             evals.push(cached_or_missing(&game.game_id, stored.get(&rung), rung));
             continue;
         }
@@ -218,6 +223,7 @@ pub fn sweep_game(
     Ok(SweepReport {
         status: status_from(conn, &game.game_id, &evals)?,
         probed,
+        deferred,
     })
 }
 
