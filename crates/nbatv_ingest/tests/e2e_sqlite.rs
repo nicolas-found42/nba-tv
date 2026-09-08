@@ -106,20 +106,21 @@ fn parsed_season_inserts_end_to_end_into_sqlite() {
     .expect("game");
 
     // 3. Parser-shaped box rows: 1946-47 era NULLs (no threes/steals/blocks),
-    //    mirroring `parse_box_page` output for a pre-modern box page.
-    for (team, pts) in [("NYK", 68), ("TRH", 66)] {
+    //    mirroring `parse_box_page` output for a pre-modern box page. TRH
+    //    carries the live-November-1946 shape: team `fga` unrecorded (None).
+    for (team, pts, fga) in [("NYK", 68, Some(60)), ("TRH", 66, None)] {
         insert_box_team(
             &conn,
             &BoxTeamRow {
                 game_id: game.game_id.clone(),
                 team_br: team.to_owned(),
                 mp: Some("240".to_owned()),
-                fg: 20,
-                fga: 60,
+                fg: Some(20),
+                fga,
                 fg3: None,
                 fg3a: None,
-                ft: 28,
-                fta: 40,
+                ft: Some(28),
+                fta: Some(40),
                 oreb: None,
                 dreb: None,
                 reb: None,
@@ -127,8 +128,8 @@ fn parsed_season_inserts_end_to_end_into_sqlite() {
                 stl: None,
                 blk: None,
                 tov: None,
-                pf: 15,
-                pts,
+                pf: Some(15),
+                pts: Some(pts),
                 plus_minus: None,
             },
         )

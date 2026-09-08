@@ -159,8 +159,26 @@ impl FixtureStore {
             boxes: vec![
                 box_score(
                     "194611010TRH",
-                    box_team("194611010TRH", "NYK", 24, 28, 20, 25, 14, 68),
-                    box_team("194611010TRH", "TRH", 22, 30, 22, 27, 16, 66),
+                    box_team(
+                        "194611010TRH",
+                        "NYK",
+                        Some(24),
+                        Some(28),
+                        Some(20),
+                        Some(25),
+                        Some(14),
+                        Some(68),
+                    ),
+                    box_team(
+                        "194611010TRH",
+                        "TRH",
+                        Some(22),
+                        None,
+                        Some(22),
+                        Some(27),
+                        Some(16),
+                        Some(66),
+                    ),
                     vec![
                         box_player(
                             "194611010TRH",
@@ -218,8 +236,26 @@ impl FixtureStore {
                 ),
                 box_score(
                     "194612070BOS",
-                    box_team("194612070BOS", "NYK", 20, 26, 9, 12, 12, 49),
-                    box_team("194612070BOS", "BOS", 23, 29, 9, 14, 15, 55),
+                    box_team(
+                        "194612070BOS",
+                        "NYK",
+                        Some(20),
+                        Some(26),
+                        Some(9),
+                        Some(12),
+                        Some(12),
+                        Some(49),
+                    ),
+                    box_team(
+                        "194612070BOS",
+                        "BOS",
+                        Some(23),
+                        Some(29),
+                        Some(9),
+                        Some(14),
+                        Some(15),
+                        Some(55),
+                    ),
                     vec![
                         box_player(
                             "194612070BOS",
@@ -255,8 +291,26 @@ impl FixtureStore {
                 ),
                 box_score(
                     "194704160BOS",
-                    box_team("194704160BOS", "NYK", 21, 30, 16, 20, 18, 58),
-                    box_team("194704160BOS", "BOS", 24, 32, 12, 16, 14, 60),
+                    box_team(
+                        "194704160BOS",
+                        "NYK",
+                        Some(21),
+                        Some(30),
+                        Some(16),
+                        Some(20),
+                        Some(18),
+                        Some(58),
+                    ),
+                    box_team(
+                        "194704160BOS",
+                        "BOS",
+                        Some(24),
+                        Some(32),
+                        Some(12),
+                        Some(16),
+                        Some(14),
+                        Some(60),
+                    ),
                     vec![
                         box_player(
                             "194704160BOS",
@@ -292,8 +346,26 @@ impl FixtureStore {
                 ),
                 box_score(
                     "194711150BOS",
-                    box_team("194711150BOS", "NYK", 25, 34, 15, 19, 17, 65),
-                    box_team("194711150BOS", "BOS", 27, 35, 16, 20, 13, 70),
+                    box_team(
+                        "194711150BOS",
+                        "NYK",
+                        Some(25),
+                        Some(34),
+                        Some(15),
+                        Some(19),
+                        Some(17),
+                        Some(65),
+                    ),
+                    box_team(
+                        "194711150BOS",
+                        "BOS",
+                        Some(27),
+                        Some(35),
+                        Some(16),
+                        Some(20),
+                        Some(13),
+                        Some(70),
+                    ),
                     vec![
                         box_player(
                             "194711150BOS",
@@ -505,12 +577,12 @@ impl FixtureStore {
 fn box_team(
     game_id: &str,
     team_br: &str,
-    fg: u32,
-    fga: u32,
-    ft: u32,
-    fta: u32,
-    pf: u32,
-    pts: u32,
+    fg: Option<u32>,
+    fga: Option<u32>,
+    ft: Option<u32>,
+    fta: Option<u32>,
+    pf: Option<u32>,
+    pts: Option<u32>,
 ) -> BoxTeam {
     // Early eras did not record minutes, offensive/defensive splits,
     // steals, blocks, or plus/minus: all `None`, rendered as `—`.
@@ -735,8 +807,10 @@ mod tests {
             assert_eq!(cell(row.blk), "—");
             assert_eq!(cell(row.plus_minus), "—");
         }
-        // Recorded totals still render.
-        assert_eq!(cell(Some(bx.teams[0].pts)), "68");
+        // Recorded totals still render; the TRH fixture row carries the
+        // live-November-1946 shape (team `fga` unrecorded) and renders `—`.
+        assert_eq!(cell(bx.teams[0].pts), "68");
+        assert_eq!(cell(bx.teams[1].fga), "—");
         // DNP row: every stat cell is `—`, reason survives.
         let dnp = bx.players.iter().find(|p| p.dnp_reason.is_some()).unwrap();
         assert_eq!(cell(dnp.pts), "—");

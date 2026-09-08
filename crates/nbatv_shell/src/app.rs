@@ -392,14 +392,14 @@ impl ShellApp {
                 ui.end_row();
                 for row in &bx.teams {
                     ui.monospace(&row.team_br);
-                    ui.monospace(cell(Some(row.fg)));
-                    ui.monospace(cell(Some(row.fga)));
-                    ui.monospace(cell(Some(row.ft)));
-                    ui.monospace(cell(Some(row.fta)));
+                    ui.monospace(cell(row.fg));
+                    ui.monospace(cell(row.fga));
+                    ui.monospace(cell(row.ft));
+                    ui.monospace(cell(row.fta));
                     ui.monospace(cell(row.stl));
                     ui.monospace(cell(row.blk));
-                    ui.monospace(cell(Some(row.pf)));
-                    ui.monospace(cell(Some(row.pts)));
+                    ui.monospace(cell(row.pf));
+                    ui.monospace(cell(row.pts));
                     ui.monospace(cell(row.plus_minus));
                     ui.end_row();
                 }

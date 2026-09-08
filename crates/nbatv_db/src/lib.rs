@@ -154,17 +154,24 @@ pub struct GameRow {
 /// Widens #3 §4's enumerated columns with `fg3`/`fg3a`/`tov`: BR publishes
 /// threes from 1979-80 and turnovers in the modern era, so they are stored
 /// when recorded and `None` for earlier seasons — same NULL rule as above.
+///
+/// Live-data correction (1946-47 crawl): even the "always recorded" core —
+/// `fg`/`fga`/`ft`/`fta`/`pf`/`pts` — goes unrecorded in the earliest
+/// seasons (November 1946 team totals blank `fga`, and variously `fta` and
+/// `pf`). All six are therefore nullable: blank means era-did-not-record,
+/// never zero. `pts` is present on every observed totals row and is the
+/// minimum for a usable result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoxTeamRow {
     pub game_id: String,
     pub team_br: String,
     pub mp: Option<String>,
-    pub fg: i32,
-    pub fga: i32,
+    pub fg: Option<i32>,
+    pub fga: Option<i32>,
     pub fg3: Option<i32>,
     pub fg3a: Option<i32>,
-    pub ft: i32,
-    pub fta: i32,
+    pub ft: Option<i32>,
+    pub fta: Option<i32>,
     pub oreb: Option<i32>,
     pub dreb: Option<i32>,
     pub reb: Option<i32>,
@@ -172,8 +179,8 @@ pub struct BoxTeamRow {
     pub stl: Option<i32>,
     pub blk: Option<i32>,
     pub tov: Option<i32>,
-    pub pf: i32,
-    pub pts: i32,
+    pub pf: Option<i32>,
+    pub pts: Option<i32>,
     pub plus_minus: Option<f64>,
 }
 
@@ -284,12 +291,12 @@ pub fn create_schema(conn: &Connection) -> SqlResult<()> {
             game_id    TEXT NOT NULL,
             team_br    TEXT NOT NULL,
             mp         TEXT NULL,
-            fg         INTEGER NOT NULL,
-            fga        INTEGER NOT NULL,
+            fg         INTEGER NULL,
+            fga        INTEGER NULL,
             fg3        INTEGER NULL,
             fg3a       INTEGER NULL,
-            ft         INTEGER NOT NULL,
-            fta        INTEGER NOT NULL,
+            ft         INTEGER NULL,
+            fta        INTEGER NULL,
             oreb       INTEGER NULL,
             dreb       INTEGER NULL,
             reb        INTEGER NULL,
@@ -297,8 +304,8 @@ pub fn create_schema(conn: &Connection) -> SqlResult<()> {
             stl        INTEGER NULL,
             blk        INTEGER NULL,
             tov        INTEGER NULL,
-            pf         INTEGER NOT NULL,
-            pts        INTEGER NOT NULL,
+            pf         INTEGER NULL,
+            pts        INTEGER NULL,
             plus_minus REAL NULL,
             PRIMARY KEY (game_id, team_br)
         );
@@ -694,12 +701,12 @@ mod tests {
                     game_id: "194611010TRH".to_owned(),
                     team_br: team.to_owned(),
                     mp: Some("240".to_owned()),
-                    fg,
-                    fga,
+                    fg: Some(fg),
+                    fga: Some(fga),
                     fg3: None,
                     fg3a: None,
-                    ft,
-                    fta,
+                    ft: Some(ft),
+                    fta: Some(fta),
                     oreb: None,
                     dreb: None,
                     reb: None,
@@ -707,8 +714,8 @@ mod tests {
                     stl: None,
                     blk: None,
                     tov: None,
-                    pf,
-                    pts,
+                    pf: Some(pf),
+                    pts: Some(pts),
                     plus_minus: None,
                 },
             )

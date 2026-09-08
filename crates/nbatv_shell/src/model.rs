@@ -189,25 +189,27 @@ impl Game {
     }
 }
 
-/// Team totals for one Game. Non-`Option` columns were always recorded;
-/// `Option` columns are `None` where the era did not record them.
+/// Team totals for one Game. Every stat column is `Option`: `None` where
+/// the era did not record it (live-data correction from the 1946-47 crawl —
+/// even November 1946 team `fga`, variously `fta`/`pf`, go unrecorded).
+/// Renders as `—`, never an invented zero.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoxTeam {
     pub game_id: String,
     pub team_br: String,
     pub mp: Option<u32>,
-    pub fg: u32,
-    pub fga: u32,
-    pub ft: u32,
-    pub fta: u32,
+    pub fg: Option<u32>,
+    pub fga: Option<u32>,
+    pub ft: Option<u32>,
+    pub fta: Option<u32>,
     pub oreb: Option<u32>,
     pub dreb: Option<u32>,
     pub reb: Option<u32>,
     pub ast: Option<u32>,
     pub stl: Option<u32>,
     pub blk: Option<u32>,
-    pub pf: u32,
-    pub pts: u32,
+    pub pf: Option<u32>,
+    pub pts: Option<u32>,
     pub plus_minus: Option<i32>,
 }
 

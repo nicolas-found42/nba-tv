@@ -373,12 +373,12 @@ pub struct GamesPage {
 pub struct BoxTeamInput {
     pub team_br: String,
     pub mp: Option<String>,
-    pub fg: i32,
-    pub fga: i32,
+    pub fg: Option<i32>,
+    pub fga: Option<i32>,
     pub fg3: Option<i32>,
     pub fg3a: Option<i32>,
-    pub ft: i32,
-    pub fta: i32,
+    pub ft: Option<i32>,
+    pub fta: Option<i32>,
     pub oreb: Option<i32>,
     pub dreb: Option<i32>,
     pub reb: Option<i32>,
@@ -386,8 +386,8 @@ pub struct BoxTeamInput {
     pub stl: Option<i32>,
     pub blk: Option<i32>,
     pub tov: Option<i32>,
-    pub pf: i32,
-    pub pts: i32,
+    pub pf: Option<i32>,
+    pub pts: Option<i32>,
     pub plus_minus: Option<f64>,
 }
 
@@ -765,6 +765,18 @@ fn slug_from_box_href(href: &str) -> Option<String> {
     }
 }
 
+/// `YYYY-MM-DD` shape check for schedule `csk` values (live pages carry the
+/// game slug there instead — see `parse_games_page`).
+fn is_ymd(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[..4].iter().all(|c| c.is_ascii_digit())
+        && b[5..7].iter().all(|c| c.is_ascii_digit())
+        && b[8..10].iter().all(|c| c.is_ascii_digit())
+}
+
 /// `NYK` from `/teams/NYK/1947.html`.
 fn slug_from_team_href(href: &str) -> Option<String> {
     let path = href.split(['?', '#']).next().unwrap_or(href);
@@ -970,8 +982,11 @@ pub fn parse_games_page(html: &str) -> GamesPage {
             skipped_bad_slugs += 1;
             continue;
         }
+        // Live-data correction: on real schedule pages `date_game`'s `csk`
+        // is the game slug (e.g. `194611010TRH`), not a machine date — only
+        // a `YYYY-MM-DD`-shaped `csk` wins over the display text.
         let date_text = date
-            .and_then(|c| c.csk.clone())
+            .and_then(|c| c.csk.clone().filter(|s| is_ymd(s)))
             .or_else(|| date.map(|c| c.text.clone()))
             .unwrap_or_default();
         rows.push(GameIndexRow {
@@ -1025,26 +1040,22 @@ fn gated_int(
 /// them is malformed and skipped; everything else is nullable.
 fn parse_box_team_row(team_br: &str, cells: &[Cell], season: Option<i32>) -> Option<BoxTeamInput> {
     let req = |stat: &str| parse_opt_int(cell_text(cells, stat));
-    let (Some(fg), Some(fga), Some(ft), Some(fta), Some(pf), Some(pts)) = (
-        req("fg"),
-        req("fga"),
-        req("ft"),
-        req("fta"),
-        req("pf"),
-        req("pts"),
-    ) else {
-        return None;
-    };
+    // Live-data correction (1946-47 crawl): the earliest seasons blank even
+    // core cells (November 1946 team totals carry no `fga`, variously no
+    // `fta`/`pf`), so every column is optional and blank means
+    // era-did-not-record, never zero. Only `pts` is required — a totals row
+    // without points records no result and is skipped.
+    let pts = req("pts")?;
     Some(BoxTeamInput {
         team_br: team_br.to_owned(),
         // Team MP (`240`) is a bookkeeping total, recorded in every era.
         mp: opt_text(cell_text(cells, "mp")),
-        fg,
-        fga,
+        fg: req("fg"),
+        fga: req("fga"),
         fg3: gated_int(cells, "fg3", "fg3", season, true),
         fg3a: gated_int(cells, "fg3a", "fg3a", season, true),
-        ft,
-        fta,
+        ft: req("ft"),
+        fta: req("fta"),
         oreb: gated_int(cells, "orb", "oreb", season, true),
         dreb: gated_int(cells, "drb", "dreb", season, true),
         reb: gated_int(cells, "trb", "reb", season, true),
@@ -1052,8 +1063,8 @@ fn parse_box_team_row(team_br: &str, cells: &[Cell], season: Option<i32>) -> Opt
         stl: gated_int(cells, "stl", "stl", season, true),
         blk: gated_int(cells, "blk", "blk", season, true),
         tov: gated_int(cells, "tov", "tov", season, true),
-        pf,
-        pts,
+        pf: req("pf"),
+        pts: Some(pts),
         plus_minus: parse_opt_plus_minus(cell_text(cells, "plus_minus")),
     })
 }
@@ -1188,7 +1199,13 @@ pub fn parse_totals_page(html: &str, season: i32) -> Vec<SeasonTotalInput> {
     let mut out = Vec::new();
     for row in table_rows(body) {
         let cells = row_cells(row);
-        let player_cell = match cells.iter().find(|c| c.stat == "player") {
+        // Live pages renamed the column keys (`name_display` for the player,
+        // `team_name_abbr` for the team, `games` for games played); accept
+        // both the documented and the live shapes.
+        let player_cell = match cells
+            .iter()
+            .find(|c| c.stat == "player" || c.stat == "name_display")
+        {
             Some(c) => c,
             None => continue,
         };
@@ -1198,13 +1215,15 @@ pub fn parse_totals_page(html: &str, season: i32) -> Vec<SeasonTotalInput> {
         };
         let team_br = match cells
             .iter()
-            .find(|c| c.stat == "team" || c.stat == "team_id")
+            .find(|c| c.stat == "team" || c.stat == "team_id" || c.stat == "team_name_abbr")
             .map(|c| c.text.trim().to_owned())
         {
             Some(t) if !t.is_empty() => t,
             _ => continue,
         };
-        let g = match parse_opt_int(cell_text(&cells, "g")) {
+        let g = match parse_opt_int(cell_text(&cells, "g"))
+            .or_else(|| parse_opt_int(cell_text(&cells, "games")))
+        {
             Some(g) => g,
             None => continue,
         };
@@ -1293,6 +1312,15 @@ impl std::error::Error for FetchError {
 /// Page source for [`fetch_season`]. Production use is a thin HTTP client;
 /// tests substitute canned HTML. Returns the raw page body; the pipeline
 /// derives freshness stamps and snapshot bytes itself.
+///
+/// The body MUST be transfer-decoded (identity) text: the client must not
+/// hand back compressed bytes. In practice that means sending no
+/// `Accept-Encoding: gzip` (BR then serves identity), or inflating the
+/// response before returning — the `String` return type already forces
+/// this, since compressed bytes are not valid UTF-8. Snapshot storage
+/// re-compresses with [`gzip_encode`] itself, so the pipeline never meets
+/// server-side dynamic-Huffman gzip: [`gzip_decode`] only ever reads back
+/// what [`write_snapshot_gz`] wrote (plus `gzip -0`-shaped files).
 pub trait FetchClient {
     fn fetch(&self, url: &str) -> Result<String, FetchError>;
 }
@@ -1846,6 +1874,26 @@ mod br_parse_tests {
         assert!(page.rows.iter().all(|r| r.game_id != "not-a-game"));
     }
 
+    #[test]
+    fn games_page_slug_csk_falls_back_to_display_date() {
+        // Live schedule pages carry the game slug in `date_game`'s `csk`,
+        // not a machine date — only a `YYYY-MM-DD` csk wins; otherwise the
+        // display text is the date (observed 1946-47 crawl).
+        let html = "\
+<table class=\"stats_table\" id=\"schedule\"><tbody>\
+<tr>\
+<th data-stat=\"date_game\" csk=\"194611010TRH\">Fri, Nov 1, 1946</th>\
+<td data-stat=\"visitor_team_name\"><a href=\"/teams/NYK/1947.html\">New York Knicks</a></td>\
+<td data-stat=\"home_team_name\"><a href=\"/teams/TRH/1947.html\">Toronto Huskies</a></td>\
+<td data-stat=\"box_score_text\"><a href=\"/boxscores/194611010TRH.html\">Box Score</a></td>\
+</tr>\
+</tbody></table>";
+        let page = parse_games_page(html);
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].game_id, "194611010TRH");
+        assert_eq!(page.rows[0].date, "Fri, Nov 1, 1946");
+    }
+
     /// Modern box shape (2015 Finals): full stat columns, Starters/Reserves
     /// sections, a DNP row, blank team `+/-`, and a multibyte name.
     const BOX_MODERN_HTML: &str = "\
@@ -1945,7 +1993,7 @@ mod br_parse_tests {
         let gsw = teams.iter().find(|t| t.team_br == "GSW").unwrap();
         assert_eq!(
             (gsw.fg, gsw.fga, gsw.ft, gsw.fta, gsw.pf, gsw.pts),
-            (38, 85, 19, 24, 22, 105)
+            (Some(38), Some(85), Some(19), Some(24), Some(22), Some(105))
         );
         assert_eq!((gsw.fg3, gsw.fg3a), (Some(10), Some(30)));
         assert_eq!((gsw.oreb, gsw.dreb, gsw.reb), (Some(9), Some(33), Some(42)));
@@ -2061,7 +2109,7 @@ mod br_parse_tests {
         let nyk = teams.iter().find(|t| t.team_br == "NYK").unwrap();
         assert_eq!(
             (nyk.fg, nyk.fga, nyk.ft, nyk.fta, nyk.pf, nyk.pts),
-            (22, 60, 24, 30, 22, 68)
+            (Some(22), Some(60), Some(24), Some(30), Some(22), Some(68))
         );
         assert_eq!(nyk.mp.as_deref(), Some("240"));
         // Era-absent stats are None, never 0.
@@ -2091,6 +2139,40 @@ mod br_parse_tests {
         assert_eq!(ed.dnp_reason, None);
         // No section headers on the era page: starter stays unknown.
         assert_eq!(ed.starter, None);
+    }
+
+    /// Live 1946 shape: team totals blank even core cells (`fga` always in
+    /// November 1946, variously `fta`/`pf`). The row is kept with `None`s —
+    /// blank means era-did-not-record, never zero — while a totals row with
+    /// no `pts` at all records no result and is skipped.
+    const BOX_LIVE_BLANKS_HTML: &str = "\
+<table class=\"stats_table\" id=\"box-TRH-game-basic\">\
+<tbody>\
+<tr><th data-stat=\"player\">Team Totals</th>\
+<td data-stat=\"mp\">240</td><td data-stat=\"fg\">25</td><td data-stat=\"fga\"></td>\
+<td data-stat=\"ft\">16</td><td data-stat=\"fta\"></td>\
+<td data-stat=\"pf\"></td><td data-stat=\"pts\">66</td>\
+</tr>\
+</tbody></table>\
+<table class=\"stats_table\" id=\"box-XXX-game-basic\">\
+<tbody>\
+<tr><th data-stat=\"player\">Team Totals</th>\
+<td data-stat=\"mp\">240</td><td data-stat=\"fg\">25</td><td data-stat=\"fga\"></td>\
+<td data-stat=\"ft\">16</td><td data-stat=\"fta\"></td>\
+<td data-stat=\"pf\"></td><td data-stat=\"pts\"></td>\
+</tr>\
+</tbody></table>";
+
+    #[test]
+    fn box_page_live_blanks_keep_row_with_nones() {
+        let (teams, _) = parse_box_page(BOX_LIVE_BLANKS_HTML);
+        assert_eq!(teams.len(), 1);
+        let trh = &teams[0];
+        assert_eq!(trh.team_br, "TRH");
+        assert_eq!(
+            (trh.fg, trh.fga, trh.ft, trh.fta, trh.pf, trh.pts),
+            (Some(25), None, Some(16), None, None, Some(66))
+        );
     }
 
     /// Totals shape (2014-15): a full row, a traded player with stint rows
@@ -2198,6 +2280,29 @@ mod br_parse_tests {
         assert_eq!(jokic.team_br, "DEN");
         assert_eq!(jokic.blk, None);
         assert_eq!(jokic.stl, Some(70));
+    }
+
+    #[test]
+    fn totals_page_accepts_live_key_aliases() {
+        // Live totals tables renamed the column keys (`name_display`,
+        // `team_name_abbr`, `games`); the parser accepts both shapes
+        // (observed 1946-47 crawl, Fulks row).
+        let html = "\
+<table class=\"stats_table\" id=\"totals_stats\"><tbody>\
+<tr>\
+<th data-stat=\"name_display\"><a href=\"/players/f/fulksjo01.html\">Joe Fulks</a></th>\
+<td data-stat=\"team_name_abbr\">PHW</td>\
+<td data-stat=\"games\">60</td>\
+<td data-stat=\"fg\">389</td><td data-stat=\"fga\">1400</td>\
+<td data-stat=\"pts\">1389</td>\
+</tr>\
+</tbody></table>";
+        let rows = parse_totals_page(html, 1947);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].player_br, "fulksjo01");
+        assert_eq!(rows[0].team_br, "PHW");
+        assert_eq!(rows[0].g, 60);
+        assert_eq!(rows[0].pts, Some(1389));
     }
 
     #[test]
