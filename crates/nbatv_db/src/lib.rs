@@ -504,6 +504,36 @@ pub fn insert_team(conn: &Connection, t: &TeamRow) -> SqlResult<()> {
     Ok(())
 }
 
+/// Ingest-convergence write for the snapshot builder: the crawl recomputes
+/// the observed span wholesale, so a re-ingest over a grown crawl replaces
+/// the row with the crawl's current truth (no MIN/MAX accumulation).
+pub fn upsert_team(conn: &Connection, t: &TeamRow) -> SqlResult<()> {
+    conn.execute(
+        "INSERT INTO teams
+            (br_slug, nba_team_id, franchise_id, city, name, abbrev, active_from, active_to)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT (br_slug) DO UPDATE SET
+            nba_team_id = excluded.nba_team_id,
+            franchise_id = excluded.franchise_id,
+            city = excluded.city,
+            name = excluded.name,
+            abbrev = excluded.abbrev,
+            active_from = excluded.active_from,
+            active_to = excluded.active_to",
+        rusqlite::params![
+            t.br_slug,
+            t.nba_team_id,
+            t.franchise_id,
+            t.city,
+            t.name,
+            t.abbrev,
+            t.active_from,
+            t.active_to
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn insert_player(conn: &Connection, p: &PlayerRow) -> SqlResult<()> {
     conn.execute(
         "INSERT INTO players (br_slug, nba_person_id, name, first_season, last_season)
@@ -526,6 +556,51 @@ pub fn insert_game(conn: &Connection, g: &GameRow) -> SqlResult<()> {
              home_team, away_team, home_pts, away_pts, ot, arena,
              attendance, br_url, sources)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        rusqlite::params![
+            g.game_id,
+            g.nba_game_id,
+            g.league,
+            g.season,
+            g.date,
+            g.game_type,
+            g.home_team,
+            g.away_team,
+            g.home_pts,
+            g.away_pts,
+            g.ot,
+            g.arena,
+            g.attendance,
+            g.br_url,
+            g.sources
+        ],
+    )?;
+    Ok(())
+}
+
+/// Ingest-convergence write for the snapshot builder: re-ingesting a game
+/// with a box snapshot upgrades the schedule-only row (0-0) to real scores
+/// and refreshes parsed fields. `sources` is deliberately absent from the
+/// UPDATE set — the catalog owns that JSON and must survive re-ingests.
+pub fn upsert_game(conn: &Connection, g: &GameRow) -> SqlResult<()> {
+    conn.execute(
+        "INSERT INTO games
+            (game_id, nba_game_id, league, season, date, game_type,
+             home_team, away_team, home_pts, away_pts, ot, arena,
+             attendance, br_url, sources)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+         ON CONFLICT (game_id) DO UPDATE SET
+            league = excluded.league,
+            season = excluded.season,
+            date = excluded.date,
+            game_type = excluded.game_type,
+            home_team = excluded.home_team,
+            away_team = excluded.away_team,
+            home_pts = excluded.home_pts,
+            away_pts = excluded.away_pts,
+            ot = excluded.ot,
+            arena = excluded.arena,
+            attendance = excluded.attendance,
+            br_url = excluded.br_url",
         rusqlite::params![
             g.game_id,
             g.nba_game_id,
@@ -1769,5 +1844,79 @@ mod tests {
         assert_eq!(ready_cache_entry_for(&conn, "000000000AAA").unwrap(), None);
         assert_eq!(cache_state_for(&conn, "000000000AAA").unwrap(), None);
         assert!(cache_entries_for(&conn, "000000000AAA").unwrap().is_empty());
+    }
+
+    #[test]
+    fn upsert_game_upgrades_scores_without_touching_sources() {
+        let conn = memdb();
+        // First ingest pass: schedule-only row, scores unknown (0), while
+        // the catalog has already attached a tape source to the game.
+        let mut bare = first_game();
+        bare.home_pts = 0;
+        bare.away_pts = 0;
+        bare.sources = r#"["ia"]"#.to_owned();
+        insert_game(&conn, &bare).unwrap();
+
+        // A later pass with the box snapshot refreshes every parsed field,
+        // but the catalog-owned sources JSON must survive the rewrite.
+        upsert_game(&conn, &first_game()).unwrap();
+        let (home_pts, away_pts, sources): (i32, i32, String) = conn
+            .query_row(
+                "SELECT home_pts, away_pts, sources FROM games WHERE game_id = '194611010TRH'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(home_pts, 66, "the box-derived score lands");
+        assert_eq!(away_pts, 68);
+        assert_eq!(
+            sources, r#"["ia"]"#,
+            "re-ingest never clobbers tape sources"
+        );
+        assert_eq!(game_count(&conn), 1, "upsert replaces, never duplicates");
+    }
+
+    #[test]
+    fn upsert_team_replaces_the_observed_span() {
+        let conn = memdb();
+        let mut team = TeamRow {
+            br_slug: "NYK".to_owned(),
+            nba_team_id: None,
+            franchise_id: None,
+            city: "New York".to_owned(),
+            name: "Knicks".to_owned(),
+            abbrev: "NYK".to_owned(),
+            active_from: Some(1946),
+            active_to: None,
+        };
+        insert_team(&conn, &team).unwrap();
+        // A later ingest over a grown crawl recomputes the span wholesale:
+        // the row equals the crawl's current truth, not an accumulation.
+        team.active_to = Some(2025);
+        upsert_team(&conn, &team).unwrap();
+        let (from, to): (i32, i32) = conn
+            .query_row(
+                "SELECT active_from, active_to FROM teams WHERE br_slug = 'NYK'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((from, to), (1946, 2025));
+        assert_eq!(team_count(&conn), 1, "upsert replaces, never duplicates");
+    }
+
+    fn game_count(conn: &Connection) -> i64 {
+        count(conn, "games")
+    }
+
+    fn team_count(conn: &Connection) -> i64 {
+        count(conn, "teams")
+    }
+
+    fn count(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
     }
 }
