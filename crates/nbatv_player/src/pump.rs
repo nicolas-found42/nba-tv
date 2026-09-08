@@ -18,7 +18,10 @@
 use std::io::Read;
 use std::process::{Child, ChildStdout, Command, Stdio};
 
-use crate::lane_a::{play_pipe_args, seek_play_args, RawFrame};
+use crate::lane_a::{
+    play_pipe_args, play_scaled_args, seek_play_args, seek_scaled_args, RawFrame, LANE_A_HEIGHT,
+    LANE_A_WIDTH,
+};
 
 /// Why a [`Pump`] could not be opened or re-seeked.
 #[derive(Debug)]
@@ -62,6 +65,11 @@ pub struct Pump {
     height: u32,
     frame_len: usize,
     frames_yielded: u64,
+    /// Whether the extent filter is applied: `false` for the unscaled
+    /// builders, `true` for the scaled ones. A seek must emit the same
+    /// frame size as the original spawn, or the reader mis-frames every
+    /// subsequent frame.
+    scaled: bool,
 }
 
 impl Pump {
@@ -81,19 +89,57 @@ impl Pump {
             height,
             frame_len,
             frames_yielded: 0,
+            scaled: false,
+        })
+    }
+
+    /// Start decoding `src` at the normalized Lane A extent
+    /// ([`LANE_A_WIDTH`] x [`LANE_A_HEIGHT`]).
+    ///
+    /// The tape's native size is unknown up front (every ladder tape
+    /// differs), so this forces the extent through the scale filter: the
+    /// reader is correct by construction for every game. This is the
+    /// constructor the shell's Play path uses.
+    pub fn open_lane_a(src: &str) -> Result<Self, PumpError> {
+        Self::open_scaled(src, LANE_A_WIDTH, LANE_A_HEIGHT)
+    }
+
+    /// Start decoding `src` at a forced `width` x `height` extent.
+    ///
+    /// Same contract as [`Pump::open`], but the sidecar scales every input
+    /// frame to the declared extent first, so callers that do not know the
+    /// native size (the shell, for every game) still frame the pipe
+    /// correctly.
+    pub fn open_scaled(src: &str, width: u32, height: u32) -> Result<Self, PumpError> {
+        let frame_len = checked_frame_len(width, height)?;
+        let (child, stdout) = spawn_child(&play_scaled_args(src, width, height))?;
+        Ok(Pump {
+            child,
+            stdout,
+            src: src.to_string(),
+            width,
+            height,
+            frame_len,
+            frames_yielded: 0,
+            scaled: true,
         })
     }
 
     /// Restart decoding at `seconds`, dropping the current child.
     ///
-    /// Respawns `ffmpeg` with [`seek_play_args`](crate::lane_a::seek_play_args)
+    /// Respawns with the same builder family as the original spawn
     /// (input seek: `-ss` before `-i`) and resets
     /// [`frames_yielded`](Pump::frames_yielded) to zero. Previously yielded
     /// frames are unaffected.
     pub fn seek(&mut self, seconds: f64) -> Result<(), PumpError> {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let (child, stdout) = spawn_child(&seek_play_args(&self.src, seconds))?;
+        let args = if self.scaled {
+            seek_scaled_args(&self.src, seconds, self.width, self.height)
+        } else {
+            seek_play_args(&self.src, seconds)
+        };
+        let (child, stdout) = spawn_child(&args)?;
         self.child = child;
         self.stdout = stdout;
         self.frames_yielded = 0;
@@ -338,5 +384,34 @@ mod tests {
             full_first.expect("full stream has a first frame"),
             "offset restart must not replay the t=0 frame"
         );
+    }
+    #[test]
+    fn scaled_pump_normalizes_any_native_size() {
+        if !ffmpeg_present() {
+            println!("SKIP scaled_pump_normalizes_any_native_size: ffmpeg not installed");
+            return;
+        }
+        // The synth fixture is 32x32 native; a scaled open at 64x48 must
+        // still frame the pipe correctly — this is the every-game path
+        // (unknown native size in, fixed extent out).
+        let dir = TempDir::create("scaled").expect("scratch temp dir");
+        let mp4 = make_synth_mp4(&dir);
+        let src = mp4.to_string_lossy().into_owned();
+
+        let mut pump = Pump::open_scaled(&src, 64, 48).expect("spawn scaled pump");
+        assert_eq!(pump.dimensions(), (64, 48));
+        let mut count = 0u64;
+        while let Some(frame) = pump.next_frame() {
+            assert_eq!((frame.width, frame.height), (64, 48));
+            assert_eq!(frame.rgba.len(), 64 * 48 * 4);
+            count += 1;
+        }
+        assert_eq!(count, 5, "scaled decode must yield all 5 synth frames");
+
+        // A seek on a scaled pump must keep the forced extent.
+        pump.seek(0.5).expect("scaled seek respawns the sidecar");
+        let frame = pump.next_frame().expect("scaled seek yields frames");
+        assert_eq!((frame.width, frame.height), (64, 48));
+        assert_eq!(frame.rgba.len(), 64 * 48 * 4);
     }
 }

@@ -943,20 +943,35 @@ fn page_season(html: &str) -> Option<i32> {
     }
 }
 
-/// Schedule index from a BR `_games.html` page. Uses the `games` table when
-/// present, otherwise scans the whole document. Header rows (no team links)
-/// are ignored silently; game rows without a valid slug are skipped and
-/// counted. Dates prefer the machine `csk` (`1946-11-01`) over display text.
+/// Schedule index from a BR `_games.html` page. Scans every `games` table
+/// (the page repeats `id="games"` once per month) when present, otherwise
+/// the whole document. Header rows (no team links) are ignored silently;
+/// game rows without a valid slug are skipped and counted. Dates prefer
+/// the machine `csk` (`1946-11-01`) over display text.
 pub fn parse_games_page(html: &str) -> GamesPage {
     let all = tables(html);
-    let body: &str = all
-        .iter()
-        .find(|(id, _)| id == "games")
-        .map(|(_, inner)| *inner)
-        .unwrap_or(html);
+    let bodies: Vec<&str> = {
+        let monthly: Vec<&str> = all
+            .iter()
+            .filter(|(id, _)| id == "games")
+            .map(|(_, inner)| *inner)
+            .collect();
+        if monthly.is_empty() {
+            vec![html]
+        } else {
+            monthly
+        }
+    };
+    let rows_in: Vec<&str> = bodies.iter().flat_map(|b| table_rows(b)).collect();
+    parse_game_rows(&rows_in)
+}
+
+/// Row scan behind [`parse_games_page`]: header rows (no team links)
+/// ignored silently, slugless rows skipped and counted.
+fn parse_game_rows(rows_in: &[&str]) -> GamesPage {
     let mut rows = Vec::new();
     let mut skipped_bad_slugs = 0usize;
-    for row in table_rows(body) {
+    for row in rows_in {
         let cells = row_cells(row);
         let date = cells.iter().find(|c| c.stat == "date_game");
         let visitor = cells.iter().find(|c| c.stat == "visitor_team_name");
@@ -1892,6 +1907,32 @@ mod br_parse_tests {
         assert_eq!(page.rows.len(), 1);
         assert_eq!(page.rows[0].game_id, "194611010TRH");
         assert_eq!(page.rows[0].date, "Fri, Nov 1, 1946");
+    }
+    #[test]
+    fn games_page_scans_every_monthly_table() {
+        // Live `_games.html` pages repeat `id="games"` once per month.
+        // Taking only the first table truncates the season to October
+        // (observed on the 1964-65 crawl: 31 rows of ~600).
+        let html = "\
+<table class=\"stats_table\" id=\"games\"><tbody>\
+<tr>\
+<th data-stat=\"date_game\" csk=\"1964-10-16\">Fri, Oct 16, 1964</th>\
+<td data-stat=\"visitor_team_name\"><a href=\"/teams/DET/1965.html\">Detroit Pistons</a></td>\
+<td data-stat=\"home_team_name\"><a href=\"/teams/PHI/1965.html\">Philadelphia 76ers</a></td>\
+<td data-stat=\"box_score_text\"><a href=\"/boxscores/196410160PHI.html\">Box Score</a></td>\
+</tr>\
+</tbody></table>\
+<table class=\"stats_table\" id=\"games\"><tbody>\
+<tr>\
+<th data-stat=\"date_game\" csk=\"1965-04-25\">Sun, Apr 25, 1965</th>\
+<td data-stat=\"visitor_team_name\"><a href=\"/teams/BOS/1965.html\">Boston Celtics</a></td>\
+<td data-stat=\"home_team_name\"><a href=\"/teams/LAL/1965.html\">Los Angeles Lakers</a></td>\
+<td data-stat=\"box_score_text\"><a href=\"/boxscores/196504250LAL.html\">Box Score</a></td>\
+</tr>\
+</tbody></table>";
+        let page = parse_games_page(html);
+        let ids: Vec<&str> = page.rows.iter().map(|r| r.game_id.as_str()).collect();
+        assert_eq!(ids, vec!["196410160PHI", "196504250LAL"]);
     }
 
     /// Modern box shape (2015 Finals): full stat columns, Starters/Reserves

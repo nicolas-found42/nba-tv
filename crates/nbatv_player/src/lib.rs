@@ -33,8 +33,9 @@ pub mod pump;
 pub mod resolve;
 
 pub use lane_a::{
-    is_moov_first, normalize_args, play_pipe_args, probe_args, seek_play_args, supports_range,
-    EguiTextureStage, FrameToTexture, Mp4RangeReadiness, RawFrame, StubTextureStage, TextureImage,
+    is_moov_first, normalize_args, play_pipe_args, play_scaled_args, probe_args, seek_play_args,
+    seek_scaled_args, supports_range, EguiTextureStage, FrameToTexture, Mp4RangeReadiness,
+    RawFrame, StubTextureStage, TextureImage, LANE_A_HEIGHT, LANE_A_WIDTH,
 };
 pub use lane_b::{
     load_video_by_id_snippet, nba_app_opener, open_external, youtube_embed_url,

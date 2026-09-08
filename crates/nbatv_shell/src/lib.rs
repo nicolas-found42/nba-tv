@@ -9,7 +9,7 @@ pub mod handover;
 pub mod model;
 pub mod route;
 pub mod store;
-pub use app::ShellApp;
+pub use app::{LaneAStatus, ShellApp};
 pub use embed::{
     cue_snippet, embed_url_for, is_sanctioned_embed, EmbedBounds, EmbedError, EmbedHost,
 };

@@ -14,6 +14,22 @@ use crate::model::{cell, TapeState};
 use crate::route::Route;
 use crate::store::{FixtureStore, PaletteKind};
 use eframe::egui;
+use nbatv_player::{EguiTextureStage, FrameToTexture, Pump};
+/// Lane A playback state for the viewed game. Headless-readable via
+/// [`ShellApp::lane_a_status`]; the Game view renders it every frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LaneAStatus {
+    /// Decoding (or ready to start on the next frame pull).
+    Playing,
+    /// Held by the pause control; the sidecar and last texture are kept.
+    Paused,
+    /// Stream drained after at least one converted frame, or stopped by
+    /// the Stop control after frames showed.
+    Ended,
+    /// No session could start, or the stream ended before any frame
+    /// converted. Carries the honest reason shown in the Game view.
+    Error(String),
+}
 
 /// The Shell window.
 pub struct ShellApp {
@@ -25,6 +41,18 @@ pub struct ShellApp {
     palette_query: String,
     /// Outcome of the last Play press (pure resolve-dispatch result).
     last_dispatch: Option<PlayDispatch>,
+    /// Lane A decode session for the viewed game. `press_play` on a
+    /// progressive tape starts it (spawn is lazy: the sidecar starts on the
+    /// first frame pull, so `press_play` itself stays free of process and
+    /// network effects and headless tests never spawn). Leaving the route
+    /// or pressing Play on a non-progressive game retires it, which drops
+    /// the sidecar child.
+    lane_a_pump: Option<Pump>,
+    lane_a_src: Option<String>,
+    lane_a_stage: EguiTextureStage,
+    lane_a_texture: Option<egui::TextureHandle>,
+    lane_a_status: Option<LaneAStatus>,
+    lane_a_paused: bool,
     /// Lane B child webview, once opened (only with the `lane-b` feature).
     /// The webview lives exactly as long as this host: dropping it
     /// destroys the native child, which is why navigation clears it.
@@ -45,6 +73,12 @@ impl ShellApp {
             palette_open: false,
             palette_query: String::new(),
             last_dispatch: None,
+            lane_a_pump: None,
+            lane_a_src: None,
+            lane_a_stage: EguiTextureStage::default(),
+            lane_a_texture: None,
+            lane_a_status: None,
+            lane_a_paused: false,
             #[cfg(feature = "lane-b")]
             embed_host: None,
             #[cfg(feature = "lane-b")]
@@ -64,6 +98,9 @@ impl ShellApp {
             // auto-open nor display the previous game's embed.
             // `maybe_open_embed` then serves only the viewed game.
             self.last_dispatch = None;
+            // The sidecar child dies with the session: leaving the game
+            // stops its decode, same as the webview teardown below.
+            self.retire_lane_a();
         }
         // The child webview is a native overlay, not an egui widget: it
         // would float above the next view, so leaving a route destroys it.
@@ -102,22 +139,151 @@ impl ShellApp {
     /// through [`dispatch_for`].
     ///
     /// Cache Tier lookup is a later slice, so the cache is always `None`
-    /// for now. Recording the outcome spawns nothing itself and touches no
-    /// network: Lane B hosts the OpenEmbed outcome via `maybe_open_embed`
-    /// (lane-b feature builds); the Lane A pump spawn is the remaining
-    /// later slice. Box Score is never consulted (tape-only signal).
+    /// for now. Recording the outcome starts (or retires) the Lane A
+    /// session to match; the sidecar itself spawns lazily on the first
+    /// frame pull, so this stays free of process and network effects.
+    /// Box Score is never consulted (tape-only signal).
     pub fn press_play(&mut self, game_id: &str) {
         // Cache Tier lookup is a later slice: no cache yet, always None.
-        // Lane B effect layer lives in `maybe_open_embed` (lane-b builds);
-        // the Lane A pump spawn is the remaining later slice. This fn
-        // records the pure outcome only — never spawns `Pump`, never
-        // touches the network here.
+        // This records the pure outcome and starts/retires the Lane A
+        // session to match: a progressive dispatch starts Lane A (sidecar
+        // spawn is lazy on the first frame pull, so this stays free of
+        // process and network effects); any other dispatch retires it.
+        // Lane B hosts the OpenEmbed outcome via `maybe_open_embed`
+        // (lane-b builds). Box Score is never consulted (tape-only signal).
         let sources = self
             .store
             .game(game_id)
             .map(|game| game.sources.clone())
             .unwrap_or_default();
-        self.last_dispatch = Some(dispatch_for(game_id, None, &sources));
+        let dispatch = dispatch_for(game_id, None, &sources);
+        match &dispatch {
+            PlayDispatch::PlayProgressive { src } => self.begin_lane_a(src.clone()),
+            _ => self.retire_lane_a(),
+        }
+        self.last_dispatch = Some(dispatch);
+    }
+
+    /// Lane A session status for the viewed game, if Play resolved to a
+    /// progressive tape. Headless-readable so tests can drive playback
+    /// without a display.
+    pub fn lane_a_status(&self) -> Option<&LaneAStatus> {
+        self.lane_a_status.as_ref()
+    }
+
+    /// Source the Lane A session is (or was) decoding, if any.
+    pub fn lane_a_src(&self) -> Option<&str> {
+        self.lane_a_src.as_deref()
+    }
+
+    /// Frames the Lane A stage has converted so far this session.
+    pub fn lane_a_frames_converted(&self) -> u64 {
+        self.lane_a_stage.frames_converted
+    }
+
+    /// Whether Lane A playback is held paused.
+    pub fn lane_a_paused(&self) -> bool {
+        self.lane_a_paused
+    }
+
+    /// Start (or restart) the Lane A session for `src` at the normalized
+    /// decode extent. Records `Playing`; the sidecar itself spawns lazily
+    /// on the first [`ShellApp::advance_lane_a`] pull so recording intent
+    /// never spawns a process.
+    pub fn begin_lane_a(&mut self, src: String) {
+        self.retire_lane_a();
+        self.lane_a_src = Some(src);
+        self.lane_a_status = Some(LaneAStatus::Playing);
+    }
+
+    /// Pull one decoded frame through the Lane A stage.
+    ///
+    /// Spawns the sidecar on the first call for the session, then reads one
+    /// frame per call so the Game view can pace decode to its repaint
+    /// cadence. Returns the converted image for texture upload, or `None`
+    /// when paused, when no session exists, or at end of stream (which
+    /// settles the status to `Ended` on a clean run or `Error` when no
+    /// bytes ever decoded — e.g. a details page instead of a file).
+    /// Headless-safe: touches no window or GPU context.
+    pub fn advance_lane_a(&mut self) -> Option<nbatv_player::TextureImage> {
+        if self.lane_a_paused || self.lane_a_status.is_none() {
+            return None;
+        }
+        if self.lane_a_pump.is_none() && matches!(self.lane_a_status, Some(LaneAStatus::Playing)) {
+            let src = self.lane_a_src.clone().unwrap_or_default();
+            match Pump::open_lane_a(&src) {
+                Ok(pump) => self.lane_a_pump = Some(pump),
+                Err(err) => {
+                    self.lane_a_status = Some(LaneAStatus::Error(format!(
+                        "could not start the decoder ({err}); is ffmpeg installed?"
+                    )));
+                    return None;
+                }
+            }
+        }
+        let pump = self.lane_a_pump.as_mut()?;
+        match pump.next_frame() {
+            Some(frame) => self.lane_a_stage.convert(&frame),
+            None => {
+                self.lane_a_pump = None;
+                if self.lane_a_stage.frames_converted > 0 {
+                    self.lane_a_status = Some(LaneAStatus::Ended);
+                } else {
+                    let src = self.lane_a_src.clone().unwrap_or_default();
+                    self.lane_a_status = Some(LaneAStatus::Error(format!(
+                        "no decodable bytes from {src}: expected a progressive file URL, not a details or share page"
+                    )));
+                }
+                None
+            }
+        }
+    }
+
+    /// Hold (`true`) or resume (`false`) Lane A playback. Pausing keeps the
+    /// sidecar and the last texture; resuming continues the same stream.
+    /// No session, or a finished/failed one, ignores the call.
+    pub fn set_lane_a_paused(&mut self, paused: bool) {
+        match self.lane_a_status {
+            Some(LaneAStatus::Playing) | Some(LaneAStatus::Paused) => {
+                self.lane_a_paused = paused;
+                self.lane_a_status = Some(if paused {
+                    LaneAStatus::Paused
+                } else {
+                    LaneAStatus::Playing
+                });
+            }
+            _ => {}
+        }
+    }
+
+    /// Restart Lane A playback from the beginning of the session source.
+    /// No session source: does nothing.
+    pub fn restart_lane_a(&mut self) {
+        if let Some(src) = self.lane_a_src.clone() {
+            self.begin_lane_a(src);
+        }
+    }
+
+    /// Stop Lane A playback and show its outcome instead. used by the Game
+    /// view's Stop control; navigation and non-progressive dispatches use
+    /// [`ShellApp::retire_lane_a`].
+    pub fn stop_lane_a(&mut self) {
+        let frames = self.lane_a_stage.frames_converted;
+        self.retire_lane_a();
+        if frames > 0 {
+            self.lane_a_status = Some(LaneAStatus::Ended);
+        }
+    }
+
+    /// Drop the Lane A session entirely: sidecar child, texture, source,
+    /// status, and pause flag. Dropping the pump kills the sidecar.
+    fn retire_lane_a(&mut self) {
+        self.lane_a_pump = None;
+        self.lane_a_src = None;
+        self.lane_a_stage = EguiTextureStage::default();
+        self.lane_a_texture = None;
+        self.lane_a_status = None;
+        self.lane_a_paused = false;
     }
 
     /// Parent the Lane B child webview for the current Game view, once per
@@ -333,46 +499,68 @@ impl ShellApp {
         if game.tape == TapeState::Playable {
             ui.horizontal(|ui| {
                 if ui.button("▶ Play in Player Backend").clicked() {
-                    // Resolve via nbatv_player and record the pure dispatch
-                    // outcome. Lane B hosts OpenEmbed via `maybe_open_embed`
-                    // (lane-b builds); the Lane A pump spawn is still a
-                    // later slice. This never spawns `Pump` here and never
-                    // touches the network itself.
+                    // Resolve via the Player Backend and start/retire the
+                    // Lane A session to match (sidecar spawn is lazy on the
+                    // first frame pull, so pressing never blocks the UI).
+                    // Lane B hosts OpenEmbed via `maybe_open_embed`
+                    // (lane-b builds).
                     let game_id = game.game_id.clone();
                     self.press_play(&game_id);
                 }
             });
         }
-        if let Some(PlayDispatch::OpenEmbed { url }) = self.last_dispatch.as_ref() {
-            ui.separator();
-            ui.strong("Vendor embed — last Play outcome (Lane B)");
-            ui.monospace(url);
-            if crate::embed::is_sanctioned_embed(url) {
-                // The wording must match what this build actually hosts:
-                // default builds link no webview, so they must never claim
-                // one opens.
-                #[cfg(feature = "lane-b")]
-                {
-                    let bounds = crate::embed::EmbedBounds::PLACEHOLDER;
-                    let attempted = self.embed_open_url.as_deref() == Some(url.as_str());
-                    if self.embed_host.is_some() {
-                        ui.weak(format!(
-                            "Embed player hosted in a child webview at {}×{} @ {},{} physical px (placeholder rect).",
-                            bounds.w, bounds.h, bounds.x, bounds.y
-                        ));
-                    } else if attempted {
-                        ui.weak("The child webview failed to open — open the URL above in your browser.");
-                    } else {
-                        ui.weak("Opening the child webview…");
+        // Every Play outcome renders visibly: pressing Play must never look
+        // like nothing happened, whatever lane the tape resolved to.
+        match self.last_dispatch.clone() {
+            Some(PlayDispatch::PlayProgressive { .. }) => self.show_lane_a(ui, &game.game_id),
+            Some(PlayDispatch::OpenEmbed { url }) => {
+                ui.separator();
+                ui.strong("Vendor embed — last Play outcome (Lane B)");
+                ui.monospace(&url);
+                if crate::embed::is_sanctioned_embed(&url) {
+                    // The wording must match what this build actually hosts:
+                    // default builds link no webview, so they must never claim
+                    // one opens.
+                    #[cfg(feature = "lane-b")]
+                    {
+                        let bounds = crate::embed::EmbedBounds::PLACEHOLDER;
+                        let attempted = self.embed_open_url.as_deref() == Some(url.as_str());
+                        if self.embed_host.is_some() {
+                            ui.weak(format!(
+                                "Embed player hosted in a child webview at {}×{} @ {},{} physical px (placeholder rect).",
+                                bounds.w, bounds.h, bounds.x, bounds.y
+                            ));
+                        } else if attempted {
+                            ui.weak("The child webview failed to open — open the URL above in your browser.");
+                        } else {
+                            ui.weak("Opening the child webview…");
+                        }
                     }
+                    #[cfg(not(feature = "lane-b"))]
+                    {
+                        ui.weak("This build hosts no webview (rebuild with `--features lane-b`) — open the URL above in your browser.");
+                    }
+                } else {
+                    ui.weak("This URL fails the embed sanction gate (embeds load only from /embed/ player URLs) — open it in your browser instead.");
                 }
-                #[cfg(not(feature = "lane-b"))]
-                {
-                    ui.weak("This build hosts no webview (rebuild with `--features lane-b`) — open the URL above in your browser.");
-                }
-            } else {
-                ui.weak("This URL fails the embed sanction gate (embeds load only from /embed/ player URLs) — open it in your browser instead.");
             }
+            Some(PlayDispatch::OpenExternal { url }) => {
+                ui.separator();
+                ui.strong("External Surface — last Play outcome");
+                ui.monospace(&url);
+                ui.weak("Vendor pages (NBA App / watch.nba.com) are Widevine-encrypted: open the URL above in your browser. Nothing decodes in-window by design.");
+            }
+            Some(PlayDispatch::ShowPointer { pointer }) => {
+                ui.separator();
+                ui.strong("Pointer only — last Play outcome");
+                ui.monospace(&pointer);
+                ui.weak("This entry names where tape lives; nothing plays in-window.");
+            }
+            Some(PlayDispatch::Unavailable) => {
+                ui.separator();
+                ui.weak("Still no known tape after Play — the Box Score below is complete.");
+            }
+            None => {}
         }
         ui.separator();
         // Box Score always renders, even when tape is unavailable.
@@ -424,6 +612,130 @@ impl ShellApp {
                     ui.end_row();
                 }
             });
+    }
+
+    /// Lane A player section: decoded video (or the honest reason there is
+    /// none) plus transport controls. Runs every frame the Game view shows
+    /// a progressive dispatch; pulls one frame per tick paced to ~30fps.
+    fn show_lane_a(&mut self, ui: &mut egui::Ui, game_id: &str) {
+        ui.separator();
+        ui.strong("Player Backend — Lane A (ffmpeg sidecar)");
+        if matches!(self.lane_a_status, Some(LaneAStatus::Playing)) {
+            if let Some(image) = self.advance_lane_a() {
+                let (w, h) = (image.width as usize, image.height as usize);
+                let color = egui::ColorImage::from_rgba_unmultiplied([w, h], &image.rgba);
+                match &mut self.lane_a_texture {
+                    Some(handle) => {
+                        if handle.size() != [w, h] {
+                            *handle = ui.ctx().load_texture("lane-a", color, Default::default());
+                        } else {
+                            handle.set(color, Default::default());
+                        }
+                    }
+                    None => {
+                        self.lane_a_texture =
+                            Some(ui.ctx().load_texture("lane-a", color, Default::default()));
+                    }
+                }
+            }
+            // Keep ticking while the stream runs. One frame per tick at
+            // ~30fps: close enough for archive footage without wall-clock
+            // sync (a driver slice can pace to the source rate later).
+            if matches!(self.lane_a_status, Some(LaneAStatus::Playing)) {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(33));
+            }
+        }
+        match self.lane_a_status.clone() {
+            Some(LaneAStatus::Playing) => {
+                if let Some(tex) = &self.lane_a_texture {
+                    let size = tex.size_vec2();
+                    let scale = (ui.available_width() / size.x).min(1.0);
+                    ui.image(egui::load::SizedTexture::new(tex.id(), size * scale));
+                    ui.weak(format!(
+                        "Playing — {} frames decoded.",
+                        self.lane_a_frames_converted()
+                    ));
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.weak("Starting the decoder…");
+                    });
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("⏸ Pause").clicked() {
+                        self.set_lane_a_paused(true);
+                    }
+                    if ui.button("↺ Restart").clicked() {
+                        self.restart_lane_a();
+                    }
+                    if ui.button("⏹ Stop").clicked() {
+                        self.stop_lane_a();
+                    }
+                });
+            }
+            Some(LaneAStatus::Paused) => {
+                if let Some(tex) = &self.lane_a_texture {
+                    let size = tex.size_vec2();
+                    let scale = (ui.available_width() / size.x).min(1.0);
+                    ui.image(egui::load::SizedTexture::new(tex.id(), size * scale));
+                }
+                ui.weak(format!(
+                    "Paused — {} frames decoded.",
+                    self.lane_a_frames_converted()
+                ));
+                ui.horizontal(|ui| {
+                    if ui.button("▶ Resume").clicked() {
+                        self.set_lane_a_paused(false);
+                    }
+                    if ui.button("↺ Restart").clicked() {
+                        self.restart_lane_a();
+                    }
+                    if ui.button("⏹ Stop").clicked() {
+                        self.stop_lane_a();
+                    }
+                });
+            }
+            Some(LaneAStatus::Ended) => {
+                if let Some(tex) = &self.lane_a_texture {
+                    let size = tex.size_vec2();
+                    let scale = (ui.available_width() / size.x).min(1.0);
+                    ui.image(egui::load::SizedTexture::new(tex.id(), size * scale));
+                }
+                ui.weak(format!(
+                    "Tape ended — {} frames played.",
+                    self.lane_a_frames_converted()
+                ));
+                if ui.button("↺ Watch again").clicked() {
+                    self.restart_lane_a();
+                }
+            }
+            Some(LaneAStatus::Error(message)) => {
+                ui.colored_label(
+                    egui::Color32::DARK_RED,
+                    format!("Lane A cannot play this tape: {message}"),
+                );
+                if let Some(src) = self.lane_a_src.clone() {
+                    ui.monospace(src);
+                }
+                ui.weak("The Box Score below is unaffected — only tape is unavailable.");
+                ui.horizontal(|ui| {
+                    if ui.button("↻ Try again").clicked() {
+                        self.restart_lane_a();
+                    }
+                    if ui.button("Dismiss").clicked() {
+                        self.retire_lane_a();
+                        self.last_dispatch = None;
+                    }
+                });
+            }
+            None => {
+                ui.weak("Playback stopped.");
+                if ui.button("▶ Play").clicked() {
+                    self.press_play(game_id);
+                }
+            }
+        }
     }
 
     fn show_palette(&mut self, ctx: &egui::Context) {

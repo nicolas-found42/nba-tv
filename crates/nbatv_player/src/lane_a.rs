@@ -58,6 +58,63 @@ pub fn seek_play_args(src: &str, seconds: f64) -> Vec<String> {
         "-".to_string(),
     ]
 }
+/// Normalized Lane A decode extent, in pixels.
+///
+/// The rawvideo pipe carries no header: the byte count of every frame is
+/// `width * height * 4`, so the caller-declared extent must match the bytes
+/// on the wire exactly. Every game's native tape size differs, so Lane A
+/// decodes through `-vf scale=<W>:<H>` (see [`play_scaled_args`]) and every
+/// consumer decodes at exactly this extent. 640x360 (16:9) keeps one frame
+/// (~900 KiB RGBA) cheap while staying recognizable on an archive browse
+/// screen.
+pub const LANE_A_WIDTH: u32 = 640;
+pub const LANE_A_HEIGHT: u32 = 360;
+
+/// Arguments that decode `src` to raw RGBA frames at a fixed extent.
+///
+/// Shape: `ffmpeg -hide_banner -i <src> -vf scale=<W>:<H> -f rawvideo
+/// -pix_fmt rgba -`. The scale filter forces the output extent so the
+/// reader can size frames as `width * height * 4` for any input size.
+/// Prefer this over [`play_pipe_args`] whenever the input dimensions are
+/// not known up front (i.e. every ladder tape); the unscaled builder stays
+/// for callers that already know the extent (tests, Cache Tier copies with
+/// recorded dimensions).
+pub fn play_scaled_args(src: &str, width: u32, height: u32) -> Vec<String> {
+    vec![
+        "-hide_banner".to_string(),
+        "-i".to_string(),
+        src.to_string(),
+        "-vf".to_string(),
+        format!("scale={width}:{height}"),
+        "-f".to_string(),
+        "rawvideo".to_string(),
+        "-pix_fmt".to_string(),
+        "rgba".to_string(),
+        "-".to_string(),
+    ]
+}
+
+/// Arguments that restart scaled playback at `seconds` via a fast input seek.
+///
+/// Same input-seek contract as [`seek_play_args`] (`-ss` before `-i`) plus
+/// the [`play_scaled_args`] extent filter, so a seeked respawn emits the
+/// same frame size as the original spawn.
+pub fn seek_scaled_args(src: &str, seconds: f64, width: u32, height: u32) -> Vec<String> {
+    vec![
+        "-hide_banner".to_string(),
+        "-ss".to_string(),
+        format!("{seconds}"),
+        "-i".to_string(),
+        src.to_string(),
+        "-vf".to_string(),
+        format!("scale={width}:{height}"),
+        "-f".to_string(),
+        "rawvideo".to_string(),
+        "-pix_fmt".to_string(),
+        "rgba".to_string(),
+        "-".to_string(),
+    ]
+}
 
 /// Cache Tier normalizer arguments (byte-exact contract).
 ///
