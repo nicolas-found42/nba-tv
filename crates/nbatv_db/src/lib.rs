@@ -115,6 +115,68 @@ pub struct GameQuery {
     pub review_title: Option<String>,
 }
 
+/// Cache Tier download state for one ranked byte-class tape row (issue #25).
+/// One row per `(game_id, rank)`: a re-fetch refreshes the row instead of
+/// failing on the primary key. `Pending` → `Fetching` → `Verifying` →
+/// `Ready`; any failure lands on `Failed` (never `Ready`), so a `Ready`
+/// row always names a verified local file Play can decode offline.
+/// Stored as `TEXT` under a `CHECK` constraint, mirroring
+/// `game_queries.best_match_level`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheState {
+    Pending,
+    Fetching,
+    Verifying,
+    Ready,
+    Failed,
+}
+
+impl CacheState {
+    /// The stored string form.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CacheState::Pending => "Pending",
+            CacheState::Fetching => "Fetching",
+            CacheState::Verifying => "Verifying",
+            CacheState::Ready => "Ready",
+            CacheState::Failed => "Failed",
+        }
+    }
+
+    /// Parse a stored string; `None` for anything the `CHECK` rejects.
+    pub fn parse(s: &str) -> Option<CacheState> {
+        match s {
+            "Pending" => Some(CacheState::Pending),
+            "Fetching" => Some(CacheState::Fetching),
+            "Verifying" => Some(CacheState::Verifying),
+            "Ready" => Some(CacheState::Ready),
+            "Failed" => Some(CacheState::Failed),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for CacheState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One Cache Tier download row: the local copy of one ranked byte-class
+/// tape source. `local_path` is the `tape/…` cache path (never committed);
+/// `bytes` is the on-disk size at the last write; `verified_at` is the
+/// `YYYY-MM-DD` verification date, set only on `Ready` rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheEntry {
+    pub game_id: String,
+    pub rank: u8,
+    pub source_class: String,
+    pub local_path: String,
+    pub bytes: i64,
+    pub verified_at: Option<String>,
+    pub state: CacheState,
+}
+
 // ---------------------------------------------------------------------------
 // Row types for inserts
 // ---------------------------------------------------------------------------
@@ -260,7 +322,7 @@ pub struct SeasonTotalRow {
 // Schema
 // ---------------------------------------------------------------------------
 
-/// Create all 9 archive tables. Idempotent (`IF NOT EXISTS`).
+/// Create all 10 archive tables. Idempotent (`IF NOT EXISTS`).
 pub fn create_schema(conn: &Connection) -> SqlResult<()> {
     conn.execute_batch(
         "
@@ -395,6 +457,17 @@ pub fn create_schema(conn: &Connection) -> SqlResult<()> {
             review_url       TEXT NULL,
             review_title     TEXT NULL,
             PRIMARY KEY (game_id, rung)
+        );
+        CREATE TABLE IF NOT EXISTS cache_entries (
+            game_id      TEXT NOT NULL,
+            rank         INTEGER NOT NULL,
+            source_class TEXT NOT NULL,
+            local_path   TEXT NOT NULL,
+            bytes        INTEGER NOT NULL DEFAULT 0,
+            verified_at  TEXT NULL,
+            state        TEXT NOT NULL
+                         CHECK (state IN ('Pending','Fetching','Verifying','Ready','Failed')),
+            PRIMARY KEY (game_id, rank)
         );
         ",
     )
@@ -700,6 +773,103 @@ pub fn upsert_tape_source(conn: &Connection, t: &TapeSource) -> SqlResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Cache Tier entries (issue #25)
+// ---------------------------------------------------------------------------
+
+/// Record-or-replace one Cache Tier download row: a re-fetch refreshes the
+/// row (new path, byte count, state) instead of failing on the primary key.
+/// `verified_at` is `Some` only on `Ready` rows; callers clear it when a
+/// re-fetch moves the row back out of `Ready`.
+pub fn upsert_cache_entry(conn: &Connection, e: &CacheEntry) -> SqlResult<()> {
+    conn.execute(
+        "INSERT INTO cache_entries
+            (game_id, rank, source_class, local_path, bytes, verified_at, state)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT (game_id, rank) DO UPDATE SET
+            source_class = excluded.source_class,
+            local_path = excluded.local_path,
+            bytes = excluded.bytes,
+            verified_at = excluded.verified_at,
+            state = excluded.state",
+        rusqlite::params![
+            e.game_id,
+            e.rank,
+            e.source_class,
+            e.local_path,
+            e.bytes,
+            e.verified_at,
+            e.state.as_str()
+        ],
+    )?;
+    Ok(())
+}
+
+fn cache_entry_from_row(row: &Row<'_>) -> rusqlite::Result<CacheEntry> {
+    let state_text: String = row.get(6)?;
+    let state = CacheState::parse(&state_text).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            6,
+            rusqlite::types::Type::Text,
+            format!("unknown cache state {state_text:?}").into(),
+        )
+    })?;
+    Ok(CacheEntry {
+        game_id: row.get(0)?,
+        rank: row.get(1)?,
+        source_class: row.get(2)?,
+        local_path: row.get(3)?,
+        bytes: row.get(4)?,
+        verified_at: row.get(5)?,
+        state,
+    })
+}
+
+/// All Cache Tier rows for a game, best rank first (whatever their state).
+pub fn cache_entries_for(conn: &Connection, game_id: &str) -> SqlResult<Vec<CacheEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT game_id, rank, source_class, local_path, bytes, verified_at, state
+         FROM cache_entries WHERE game_id = ?1 ORDER BY rank ASC",
+    )?;
+    let rows = stmt.query_map([game_id], cache_entry_from_row)?;
+    rows.collect()
+}
+
+/// The playable local copy for a game, if any: the best-ranked `Ready` row.
+/// Non-`Ready` rows (pending, fetching, failed) never surface here, so Play
+/// resolves cache-first without ever decoding an unverified file.
+pub fn ready_cache_entry_for(conn: &Connection, game_id: &str) -> SqlResult<Option<CacheEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT game_id, rank, source_class, local_path, bytes, verified_at, state
+         FROM cache_entries WHERE game_id = ?1 AND state = 'Ready'
+         ORDER BY rank ASC LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map([game_id], cache_entry_from_row)?;
+    match rows.next() {
+        None => Ok(None),
+        Some(row) => row.map(Some),
+    }
+}
+
+/// The cache state behind the Game view's compact status line: the row
+/// Play would take — the best-ranked Ready entry when one exists (a
+/// lower-rank failure must not hide a playable local file), else the
+/// best-ranked row in any state.
+pub fn cache_state_for(conn: &Connection, game_id: &str) -> SqlResult<Option<CacheState>> {
+    let mut stmt = conn.prepare(
+        "SELECT state FROM cache_entries WHERE game_id = ?1 \
+         ORDER BY CASE WHEN state = 'Ready' THEN 0 ELSE 1 END, rank ASC LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map([game_id], |row| row.get::<_, String>(0))?;
+    match rows.next() {
+        None => Ok(None),
+        Some(text) => {
+            let text = text?;
+            Ok(CacheState::parse(&text))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Reads: the catalog queries the Shell renders through (#19)
 // ---------------------------------------------------------------------------
 //
@@ -915,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_creates_all_nine_tables() {
+    fn schema_creates_all_ten_tables() {
         let conn = memdb();
         let mut names: Vec<String> = conn
             .prepare(
@@ -934,6 +1104,7 @@ mod tests {
             vec![
                 "box_player",
                 "box_team",
+                "cache_entries",
                 "game_queries",
                 "games",
                 "player_season_totals",
@@ -1458,5 +1629,129 @@ mod tests {
         let tapes = tape_sources_for(&conn, "194611010TRH").unwrap();
         assert_eq!(tapes.len(), 1);
         assert_eq!(tapes[0].verified_at, "2026-04-02");
+    }
+
+    fn cache_entry(rank: u8, state: CacheState) -> CacheEntry {
+        CacheEntry {
+            game_id: "194611010TRH".to_owned(),
+            rank,
+            source_class: "internet-archive".to_owned(),
+            local_path: "data/cache/tape/1946-47/194611010TRH__NYK-at-TRH__ia.mp4".to_owned(),
+            bytes: 714_000_000,
+            verified_at: None,
+            state,
+        }
+    }
+
+    #[test]
+    fn cache_entry_round_trips_through_all_five_states() {
+        let conn = memdb();
+        for (rank, state) in [
+            CacheState::Pending,
+            CacheState::Fetching,
+            CacheState::Verifying,
+            CacheState::Ready,
+            CacheState::Failed,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let rank = (rank + 1) as u8;
+            let mut entry = cache_entry(rank, state);
+            if state == CacheState::Ready {
+                entry.verified_at = Some("2026-09-08".to_owned());
+            }
+            upsert_cache_entry(&conn, &entry).unwrap();
+        }
+        let entries = cache_entries_for(&conn, "194611010TRH").unwrap();
+        assert_eq!(entries.len(), 5, "one row per (game_id, rank)");
+        let states: Vec<CacheState> = entries.iter().map(|e| e.state).collect();
+        assert_eq!(
+            states,
+            vec![
+                CacheState::Pending,
+                CacheState::Fetching,
+                CacheState::Verifying,
+                CacheState::Ready,
+                CacheState::Failed,
+            ],
+            "rows come back best rank first with states intact"
+        );
+        assert_eq!(
+            entries[3].verified_at.as_deref(),
+            Some("2026-09-08"),
+            "verified_at survives the round trip"
+        );
+    }
+
+    #[test]
+    fn cache_state_check_rejects_unknown_strings() {
+        let conn = memdb();
+        let rejected = conn.execute(
+            "INSERT INTO cache_entries
+                (game_id, rank, source_class, local_path, bytes, verified_at, state)
+             VALUES ('194611010TRH', 1, 'internet-archive', 'x.mp4', 0, NULL, 'Downloaded')",
+            [],
+        );
+        assert!(
+            rejected.is_err(),
+            "states outside Pending|Fetching|Verifying|Ready|Failed are rejected"
+        );
+        assert!(CacheState::parse("Downloaded").is_none());
+    }
+
+    #[test]
+    fn cache_upsert_refreshes_the_row_on_refetch() {
+        let conn = memdb();
+        upsert_cache_entry(&conn, &cache_entry(1, CacheState::Failed)).unwrap();
+        let mut retry = cache_entry(1, CacheState::Ready);
+        retry.bytes = 715_000_000;
+        retry.verified_at = Some("2026-09-08".to_owned());
+        upsert_cache_entry(&conn, &retry).unwrap();
+        let entries = cache_entries_for(&conn, "194611010TRH").unwrap();
+        assert_eq!(entries.len(), 1, "a re-fetch refreshes, never duplicates");
+        assert_eq!(entries[0].state, CacheState::Ready);
+        assert_eq!(entries[0].bytes, 715_000_000);
+        assert_eq!(entries[0].verified_at.as_deref(), Some("2026-09-08"));
+    }
+
+    #[test]
+    fn ready_lookup_skips_non_ready_rows() {
+        let conn = memdb();
+        upsert_cache_entry(&conn, &cache_entry(1, CacheState::Failed)).unwrap();
+        upsert_cache_entry(&conn, &cache_entry(4, CacheState::Fetching)).unwrap();
+        assert_eq!(
+            ready_cache_entry_for(&conn, "194611010TRH").unwrap(),
+            None,
+            "no Ready row means no cache hit, whatever else is stored"
+        );
+        assert_eq!(
+            cache_state_for(&conn, "194611010TRH").unwrap(),
+            Some(CacheState::Failed),
+            "the status line still sees the best-ranked row"
+        );
+        let mut ready = cache_entry(4, CacheState::Ready);
+        ready.verified_at = Some("2026-09-08".to_owned());
+        upsert_cache_entry(&conn, &ready).unwrap();
+        assert_eq!(
+            ready_cache_entry_for(&conn, "194611010TRH").unwrap(),
+            Some(ready),
+            "the best-ranked Ready row is the playable copy"
+        );
+        // The status line must agree with the row Play takes: a lower-rank
+        // failure must not read "fetch failed" while the local file plays.
+        assert_eq!(
+            cache_state_for(&conn, "194611010TRH").unwrap(),
+            Some(CacheState::Ready),
+            "the Ready row outranks the Failed row for the status line"
+        );
+    }
+
+    #[test]
+    fn cache_lookups_are_empty_for_unknown_games() {
+        let conn = memdb();
+        assert_eq!(ready_cache_entry_for(&conn, "000000000AAA").unwrap(), None);
+        assert_eq!(cache_state_for(&conn, "000000000AAA").unwrap(), None);
+        assert!(cache_entries_for(&conn, "000000000AAA").unwrap().is_empty());
     }
 }

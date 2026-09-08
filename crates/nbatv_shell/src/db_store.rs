@@ -29,6 +29,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::handover::CacheEntry as HandoverCacheEntry;
 use crate::model::{
     BoxPlayer, BoxScore, BoxTeam, Game, GameType, Season, TapeSource, TapeState, Team,
 };
@@ -139,6 +140,45 @@ impl DbStore {
             .into_iter()
             .map(convert_tape_source)
             .collect()
+    }
+
+    /// The playable Cache Tier copy for a game, if any: the best-ranked
+    /// `Ready` row, converted field-for-field into the handover shape Play
+    /// resolves cache-first. Non-`Ready` rows never surface here. Degrades
+    /// to `None` on error — an unreadable cache is a cache miss, never a
+    /// crash.
+    pub fn ready_cache_entry(&self, game_id: &str) -> Option<HandoverCacheEntry> {
+        nbatv_db::ready_cache_entry_for(&self.conn, game_id)
+            .ok()
+            .flatten()
+            .map(|row| HandoverCacheEntry {
+                game_id: row.game_id,
+                location: row.local_path,
+            })
+    }
+
+    /// Compact cache-status line for the Game view (`None` = no line: no
+    /// row recorded for this game). `Ready` plays offline; `Failed`
+    /// surfaces honestly; anything in flight names its state.
+    pub fn cache_status_line(&self, game_id: &str) -> Option<String> {
+        match nbatv_db::cache_state_for(&self.conn, game_id)
+            .ok()
+            .flatten()?
+        {
+            nbatv_db::CacheState::Ready => {
+                Some("Cache: ready — plays offline, no network needed.".to_owned())
+            }
+            nbatv_db::CacheState::Failed => {
+                Some("Cache: fetch failed — nothing cached, Play falls back to stream.".to_owned())
+            }
+            nbatv_db::CacheState::Fetching => {
+                Some("Cache: fetching… (interrupted downloads resume).".to_owned())
+            }
+            nbatv_db::CacheState::Verifying => {
+                Some("Cache: verifying… (duration check before it can play).".to_owned())
+            }
+            nbatv_db::CacheState::Pending => Some("Cache: fetch pending….".to_owned()),
+        }
     }
 
     pub fn game(&self, game_id: &str) -> Option<Game> {
@@ -499,6 +539,24 @@ impl Store {
             Store::Db(s) => s.review_list(game_id),
         }
     }
+
+    /// The playable Cache Tier copy for a game, if any. Fixtures hold no
+    /// cache rows (offline dev plays streams); the live database serves its
+    /// best-ranked `Ready` row.
+    pub fn ready_cache_entry(&self, game_id: &str) -> Option<HandoverCacheEntry> {
+        match self {
+            Store::Fixture(_) => None,
+            Store::Db(s) => s.ready_cache_entry(game_id),
+        }
+    }
+
+    /// Compact cache-status line for the Game view, if a row is recorded.
+    pub fn cache_status_line(&self, game_id: &str) -> Option<String> {
+        match self {
+            Store::Fixture(_) => None,
+            Store::Db(s) => s.cache_status_line(game_id),
+        }
+    }
 }
 
 /// Season slug (`1946-47`) for an archive ending year (`1947`).
@@ -767,5 +825,50 @@ mod tests {
     fn negative_stats_degrade_to_unrecorded() {
         assert_eq!(uopt(Some(-1)), None);
         assert_eq!(uopt(Some(68)), Some(68));
+    }
+
+    fn cache_row(state: nbatv_db::CacheState) -> nbatv_db::CacheEntry {
+        nbatv_db::CacheEntry {
+            game_id: "194611010TRH".to_owned(),
+            rank: 1,
+            source_class: "internet-archive".to_owned(),
+            local_path: "data/cache/tape/1946-47/194611010TRH__NYK-at-TRH__ia.mp4".to_owned(),
+            bytes: 100,
+            verified_at: None,
+            state,
+        }
+    }
+
+    #[test]
+    fn cache_status_line_names_each_state_and_hides_missing_rows() {
+        let conn = memdb();
+        let store = DbStore::from_connection(conn);
+        assert_eq!(store.cache_status_line("194611010TRH"), None);
+        assert_eq!(store.ready_cache_entry("194611010TRH"), None);
+    }
+
+    #[test]
+    fn cache_status_line_covers_in_flight_states() {
+        for (state, fragment) in [
+            (nbatv_db::CacheState::Pending, "pending"),
+            (nbatv_db::CacheState::Fetching, "fetching"),
+            (nbatv_db::CacheState::Verifying, "verifying"),
+        ] {
+            let conn = memdb();
+            nbatv_db::upsert_cache_entry(&conn, &cache_row(state)).unwrap();
+            let store = DbStore::from_connection(conn);
+            let line = store
+                .cache_status_line("194611010TRH")
+                .expect("a recorded row always yields a line");
+            assert!(
+                line.contains(fragment),
+                "{state:?} line names its state: {line}"
+            );
+            assert_eq!(
+                store.ready_cache_entry("194611010TRH"),
+                None,
+                "{state:?} rows never surface as playable"
+            );
+        }
     }
 }

@@ -55,6 +55,12 @@ pub struct ShellApp {
     lane_a_texture: Option<egui::TextureHandle>,
     lane_a_status: Option<LaneAStatus>,
     lane_a_paused: bool,
+    /// Lane B card state for the last Play press. `Some` while the last
+    /// dispatch resolved to an embed row (pending → visible, or refused
+    /// with an external fallback); `None` for every other outcome.
+    /// Always compiled so the card logic stays headless-testable; the
+    /// webview itself exists only on `lane-b` builds.
+    lane_b_session: Option<crate::embed::EmbedSession>,
     /// Lane B child webview, once opened (only with the `lane-b` feature).
     /// The webview lives exactly as long as this host: dropping it
     /// destroys the native child, which is why navigation clears it.
@@ -124,6 +130,7 @@ impl ShellApp {
             lane_a_texture: None,
             lane_a_status: None,
             lane_a_paused: false,
+            lane_b_session: None,
             #[cfg(feature = "lane-b")]
             embed_host: None,
             #[cfg(feature = "lane-b")]
@@ -149,6 +156,9 @@ impl ShellApp {
             // auto-open nor display the previous game's embed.
             // `maybe_open_embed` then serves only the viewed game.
             self.last_dispatch = None;
+            // The embed card belongs to the same press: leaving the route
+            // retires the Lane B session with the dispatch.
+            self.lane_b_session = None;
             // The sidecar child dies with the session: leaving the game
             // stops its decode, same as the webview teardown below.
             self.retire_lane_a();
@@ -189,17 +199,19 @@ impl ShellApp {
     /// resolves honestly to [`PlayDispatch::Unavailable`]) and dispatches
     /// through [`dispatch_for`].
     ///
-    /// Cache Tier lookup is a later slice, so the cache is always `None`
-    /// for now. Recording the outcome starts (or retires) the Lane A
+    /// The store's best-ranked `Ready` cache row (if any) feeds the cache
+    /// arg, so a downloaded game plays from its local file with no network.
+    /// Recording the outcome starts (or retires) the Lane A
     /// session to match; the sidecar itself spawns lazily on the first
     /// frame pull, so this stays free of process and network effects.
     /// Box Score is never consulted (tape-only signal).
     pub fn press_play(&mut self, game_id: &str) {
-        // Cache Tier lookup is a later slice: no cache yet, always None.
-        // This records the pure outcome and starts/retires the Lane A
-        // session to match: a progressive dispatch starts Lane A (sidecar
-        // spawn is lazy on the first frame pull, so this stays free of
-        // process and network effects); any other dispatch retires it.
+        // Cache-first: a Ready row plays its local file (most stable,
+        // user-owned); otherwise the ladder decides. This records the pure
+        // outcome and starts/retires the Lane A session to match: a progressive
+        // dispatch starts Lane A (sidecar spawn is lazy on the first frame
+        // pull, so this stays free of process and network effects); any other
+        // dispatch retires it.
         // Lane B hosts the OpenEmbed outcome via `maybe_open_embed`
         // (lane-b builds). Box Score is never consulted (tape-only signal).
         let sources = self
@@ -207,12 +219,27 @@ impl ShellApp {
             .game(game_id)
             .map(|game| game.sources)
             .unwrap_or_default();
-        let dispatch = dispatch_for(game_id, None, &sources);
+        let cache = self.store.ready_cache_entry(game_id);
+        let dispatch = dispatch_for(game_id, cache, &sources);
         match &dispatch {
             PlayDispatch::PlayProgressive { src } => self.begin_lane_a(src.clone()),
             _ => self.retire_lane_a(),
         }
         self.last_dispatch = Some(dispatch);
+        // Lane B records the same outcome's card state (a pending session
+        // for OpenEmbed, nothing otherwise) so the embed card composes
+        // with whatever dispatch — cache or ladder — produced it. A stale
+        // host from the previous press is dropped here too: every explicit
+        // press re-arms the one-shot open (and a non-embed press retires
+        // the overlay, matching Lane A's retire-on-non-progressive rule).
+        self.lane_b_session = crate::embed::EmbedSession::for_dispatch(
+            self.last_dispatch.as_ref().expect("just recorded"),
+        );
+        #[cfg(feature = "lane-b")]
+        {
+            self.embed_host = None;
+            self.embed_open_url = None;
+        }
     }
 
     /// Lane A session status for the viewed game, if Play resolved to a
@@ -235,6 +262,38 @@ impl ShellApp {
     /// Whether Lane A playback is held paused.
     pub fn lane_a_paused(&self) -> bool {
         self.lane_a_paused
+    }
+
+    /// Lane B card state for the last Play press, if it resolved to an
+    /// embed row. Headless-readable so dispatch/card behavior stays
+    /// testable without a window; the webview itself exists only on
+    /// `lane-b` builds.
+    pub fn lane_b_session(&self) -> Option<&crate::embed::EmbedSession> {
+        self.lane_b_session.as_ref()
+    }
+
+    /// Record that in-window framing was refused for the current embed
+    /// session (or that the child webview failed to open): the dispatch
+    /// falls back to the existing open-external path for the same URL,
+    /// surfaced as a card rather than an error. With no session — or an
+    /// already-fallen-back one — this is a no-op.
+    pub fn note_embed_refused(&mut self) {
+        if let Some(session) = self.lane_b_session.as_mut() {
+            session.mark_refused();
+            if let Some(fallback) = session.refused_fallback() {
+                self.last_dispatch = Some(fallback);
+            }
+        }
+    }
+
+    /// Raise or clear the embed card's session/sign-in hint. On `lane-b`
+    /// builds the update loop drives this from the hosted player URL; with
+    /// no session this is a no-op. The sign-in itself always completes
+    /// inside the webview — the app never sees a credential.
+    pub fn set_lane_b_sign_in_hint(&mut self, needed: bool) {
+        if let Some(session) = self.lane_b_session.as_mut() {
+            session.set_sign_in_hint(needed);
+        }
     }
 
     /// Start (or restart) the Lane A session for `src` at the normalized
@@ -345,10 +404,33 @@ impl ShellApp {
     /// to a sanctioned embed URL (see [`crate::embed::embed_url_for`]) and
     /// that URL was not already hosted or attempted: reopening every frame
     /// would stack native child windows above the egui UI with no z-order
-    /// control (map research #5). A failed open logs once and falls back
-    /// to the Game view's URL + external-fallback note — never a blank lie.
+    /// control (map research #5). A failed open logs once and records the
+    /// refusal on the Lane B session, which falls the dispatch back to the
+    /// existing open-external path — never a blank lie, never an error.
     #[cfg(feature = "lane-b")]
     fn maybe_open_embed(&mut self, frame: &eframe::Frame) {
+        // Observe the live player URL first: a vendor sign-in surface (age
+        // gate) raises the card's hint, and a vendor that bounces the iframe
+        // away from the sanctioned embed location (embed-disabled
+        // interstitial, consent wall) is a refusal, not a dead card — fall
+        // back to external open. Query-string churn does not count; a
+        // silent in-frame render refusal cannot be detected without the
+        // vendor's cooperation (honest limit, see embed.rs docs).
+        // Observation only — the sign-in completes inside the webview,
+        // whose cookies stay in the webview profile.
+        let mut refused_now = false;
+        if let Some(host) = self.embed_host.as_ref() {
+            if let Ok(current) = host.current_url() {
+                self.set_lane_b_sign_in_hint(crate::embed::is_sign_in_url(&current));
+                refused_now = self.lane_b_session.as_ref().is_some_and(|session| {
+                    session.status() == &crate::embed::LaneBStatus::Visible
+                        && !crate::embed::same_embed_location(session.url(), &current)
+                });
+            }
+        }
+        if refused_now {
+            self.note_embed_refused();
+        }
         let url = match (&self.route, &self.last_dispatch) {
             (Route::Game { .. }, Some(dispatch)) => crate::embed::embed_url_for(dispatch),
             _ => None,
@@ -363,10 +445,17 @@ impl ShellApp {
         // ever parented: native overlays ignore egui z-order.
         self.embed_host = None;
         match crate::embed::EmbedHost::open(frame, crate::embed::EmbedBounds::PLACEHOLDER, &url) {
-            Ok(host) => self.embed_host = Some(host),
-            Err(err) => eprintln!("lane-b: embed host failed for {url}: {err}"),
+            Ok(host) => {
+                self.embed_host = Some(host);
+                if let Some(session) = self.lane_b_session.as_mut() {
+                    session.mark_visible();
+                }
+            }
+            Err(err) => {
+                eprintln!("lane-b: embed host failed for {url}: {err}");
+                self.note_embed_refused();
+            }
         }
-        self.embed_open_url = Some(url);
     }
 }
 
@@ -540,6 +629,11 @@ impl ShellApp {
         ui.separator();
         // Tape banner derives ONLY from tape state — never from box presence.
         ui.colored_label(banner_color(game.tape), game.tape.banner());
+        // Cache Tier status, when a download row exists: Ready plays offline,
+        // Failed surfaces honestly, in-flight names its state. No row, no line.
+        if let Some(cache_line) = self.store.cache_status_line(game_id) {
+            ui.weak(cache_line);
+        }
         if game.tape == TapeState::Playable {
             ui.horizontal(|ui| {
                 if ui.button("▶ Play in Player Backend").clicked() {
@@ -587,12 +681,31 @@ impl ShellApp {
                 } else {
                     ui.weak("This URL fails the embed sanction gate (embeds load only from /embed/ player URLs) — open it in your browser instead.");
                 }
+                // Lane B session hint: the vendor wants a login (age gate).
+                // It completes inside the player; the app never sees a
+                // credential and sign-in state stays in the webview profile.
+                if self
+                    .lane_b_session
+                    .as_ref()
+                    .is_some_and(|session| session.sign_in_hint())
+                {
+                    ui.weak("The vendor wants a sign-in (e.g. an age check): complete it in the player — the app never sees your credentials; sign-in state stays out of the repo (webview profile, or the OS web store on macOS).");
+                }
             }
             Some(PlayDispatch::OpenExternal { url }) => {
                 ui.separator();
                 ui.strong("External Surface — last Play outcome");
                 ui.monospace(&url);
                 ui.weak("Vendor pages (NBA App / watch.nba.com) are Widevine-encrypted: open the URL above in your browser. Nothing decodes in-window by design.");
+                // Lane B framing fallback: this external card is the honest
+                // fallback for a refused embed, not a failure.
+                if self
+                    .lane_b_session
+                    .as_ref()
+                    .is_some_and(|session| session.status() == &crate::embed::LaneBStatus::Refused)
+                {
+                    ui.weak("The vendor player refused in-window framing, so this tape opens here instead — nothing failed.");
+                }
             }
             Some(PlayDispatch::ShowPointer { pointer }) => {
                 ui.separator();
@@ -961,5 +1074,116 @@ mod tests {
             game_id: "194611010TRH".into(),
         });
         assert!(app.last_dispatch().is_some());
+    }
+
+    fn cached_game_db(state: nbatv_db::CacheState) -> ShellApp {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory archive db");
+        nbatv_db::create_schema(&conn).expect("create_schema");
+        nbatv_db::insert_game(
+            &conn,
+            &nbatv_db::GameRow {
+                game_id: "194611010TRH".to_owned(),
+                nba_game_id: None,
+                league: "BAA".to_owned(),
+                season: 1947,
+                date: "1946-11-01".to_owned(),
+                game_type: "REGULAR".to_owned(),
+                home_team: "TRH".to_owned(),
+                away_team: "NYK".to_owned(),
+                home_pts: 66,
+                away_pts: 68,
+                ot: None,
+                arena: None,
+                attendance: None,
+                br_url: "https://www.basketball-reference.com/boxscores/194611010TRH.html"
+                    .to_owned(),
+                sources: "[]".to_owned(),
+            },
+        )
+        .unwrap();
+        nbatv_db::insert_tape_source(
+            &conn,
+            &nbatv_db::TapeSource {
+                game_id: "194611010TRH".to_owned(),
+                rank: 1,
+                source_class: "internet-archive".to_owned(),
+                url_or_pointer: "https://archive.org/download/194611010TRH/game.mp4".to_owned(),
+                match_confidence: 1.0,
+                verified_at: "2026-09-08".to_owned(),
+            },
+        )
+        .unwrap();
+        nbatv_db::upsert_cache_entry(
+            &conn,
+            &nbatv_db::CacheEntry {
+                game_id: "194611010TRH".to_owned(),
+                rank: 1,
+                source_class: "internet-archive".to_owned(),
+                local_path: "data/cache/tape/1946-47/194611010TRH__NYK-at-TRH__ia.mp4".to_owned(),
+                bytes: 714_000_000,
+                verified_at: if state == nbatv_db::CacheState::Ready {
+                    Some("2026-09-08".to_owned())
+                } else {
+                    None
+                },
+                state,
+            },
+        )
+        .unwrap();
+        ShellApp::from_connection(conn)
+    }
+
+    #[test]
+    fn ready_cache_entry_plays_from_its_local_path_with_no_network() {
+        let mut app = cached_game_db(nbatv_db::CacheState::Ready);
+        app.press_play("194611010TRH");
+        // The Ready row wins over the stream URL: Lane A decodes the local
+        // file, headless-proven through the same path the Play button uses.
+        assert_eq!(
+            app.last_dispatch(),
+            Some(&PlayDispatch::PlayProgressive {
+                src: "data/cache/tape/1946-47/194611010TRH__NYK-at-TRH__ia.mp4".to_string(),
+            })
+        );
+        assert_eq!(
+            app.lane_a_src(),
+            Some("data/cache/tape/1946-47/194611010TRH__NYK-at-TRH__ia.mp4")
+        );
+        assert!(matches!(app.lane_a_status(), Some(LaneAStatus::Playing)));
+        assert_eq!(
+            app.store().cache_status_line("194611010TRH").as_deref(),
+            Some("Cache: ready — plays offline, no network needed.")
+        );
+    }
+
+    #[test]
+    fn failed_cache_entry_falls_back_to_stream_and_surfaces_honestly() {
+        let mut app = cached_game_db(nbatv_db::CacheState::Failed);
+        app.press_play("194611010TRH");
+        // A Failed row is never played: dispatch falls back to the ladder
+        // stream URL, and the status line says the fetch failed.
+        assert_eq!(
+            app.last_dispatch(),
+            Some(&PlayDispatch::PlayProgressive {
+                src: "https://archive.org/download/194611010TRH/game.mp4".to_string(),
+            })
+        );
+        assert_eq!(
+            app.store().cache_status_line("194611010TRH").as_deref(),
+            Some("Cache: fetch failed — nothing cached, Play falls back to stream.")
+        );
+    }
+
+    #[test]
+    fn no_cache_row_means_no_cache_line_and_stream_dispatch() {
+        let mut app = ShellApp::with_fixture();
+        app.press_play("194611010TRH");
+        assert_eq!(
+            app.last_dispatch(),
+            Some(&PlayDispatch::PlayProgressive {
+                src: "https://archive.org/details/194611010TRH".to_string(),
+            })
+        );
+        assert_eq!(app.store().cache_status_line("194611010TRH"), None);
     }
 }

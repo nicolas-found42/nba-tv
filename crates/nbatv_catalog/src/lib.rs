@@ -13,6 +13,7 @@
 //! a [`YoutubeQuota`] tracker, and a `YYYY-MM-DD` timestamp. Everything is
 //! offline by construction — the suite links no network implementation.
 
+pub mod fetch;
 pub mod ia_probe;
 pub mod nba_probe;
 pub mod politeness;
@@ -22,6 +23,12 @@ pub mod scorer;
 pub mod sweep;
 pub mod ytdlp_probe;
 
+pub use fetch::{
+    cache_path, cache_root, fetch_to_cache, src_tag_for_url, verify, CacheFetchReport, CurlFetcher,
+    DurationProbe, FetchOutcome, FetchSpec, FfprobeDuration, ScriptStep, ScriptedDuration,
+    ScriptedFetcher, TapeFetcher, VerifyOutcome, CACHE_GITIGNORE_PATTERN, MAX_GAME_SECS,
+    MIN_GAME_SECS, RETRY_PAUSE,
+};
 pub use ia_probe::{IaError, IaHttp, IaProbe};
 pub use nba_probe::{
     finals_for_season, finals_month_ok, nba_catalog_due, nba_rescan_hint, season_for_date,

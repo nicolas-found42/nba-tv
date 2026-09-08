@@ -15,7 +15,8 @@ pub mod store;
 pub use app::{LaneAStatus, ShellApp};
 pub use db_store::{DbStore, Store, ARCHIVE_DB_PATH};
 pub use embed::{
-    cue_snippet, embed_url_for, is_sanctioned_embed, EmbedBounds, EmbedError, EmbedHost,
+    cue_snippet, embed_url_for, is_sanctioned_embed, is_sign_in_url, EmbedBounds, EmbedError,
+    EmbedHost, EmbedSession, LaneBStatus, WEBVIEW_PROFILE_DIR,
 };
 pub use handover::{dispatch_for, CacheEntry, PlayDispatch};
 pub use model::{
