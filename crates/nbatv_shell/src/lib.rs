@@ -11,6 +11,7 @@ pub mod embed;
 pub mod handover;
 pub mod model;
 pub mod route;
+pub mod routes;
 pub mod store;
 pub use app::{LaneAStatus, ShellApp};
 pub use db_store::{DbStore, Store, ARCHIVE_DB_PATH};
@@ -25,4 +26,8 @@ pub use model::{
 };
 pub use nbatv_catalog::{ReviewItem, SweepStatus};
 pub use route::{Crumb, ParseError, Route};
+pub use routes::{
+    match_collector_note, plan_shell_command, route_shell_command, GameSection, ShellCommandAction,
+    ShellCommandRoute,
+};
 pub use store::{FixtureStore, PaletteItem, PaletteKind, SeasonCounts};

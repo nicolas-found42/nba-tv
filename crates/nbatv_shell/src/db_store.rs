@@ -36,7 +36,7 @@ use crate::model::{
 use crate::route::Route;
 use crate::store::{FixtureStore, PaletteItem, PaletteKind, SeasonCounts};
 use nbatv_catalog::{
-    game_context_for, sweep_game, IaProbe, PolitenessConfig, ProbeRegistry, SweepError,
+    game_context_for, sweep_game, IaProbe, JevJudge, PolitenessConfig, ProbeRegistry, SweepError,
     SweepReport, YoutubeQuota,
 };
 use nbatv_catalog::{
@@ -235,6 +235,18 @@ impl DbStore {
     /// review card. Degrades to empty on error.
     pub fn review_list(&self, game_id: &str) -> Vec<ReviewItem> {
         catalog_review_list(&self.conn, game_id).unwrap_or_default()
+    }
+
+    /// REVIEW candidates for one game, prioritized only in memory. This is a
+    /// headless/optional seam: the UI keeps calling [`Self::review_list`] and
+    /// never blocks its update loop on the Jev sidecar.
+    pub fn review_list_with_judge(
+        &self,
+        game_id: &str,
+        judge: &dyn JevJudge,
+        query: &str,
+    ) -> Vec<ReviewItem> {
+        nbatv_catalog::review_list_with_judge(&self.conn, game_id, judge, query).unwrap_or_default()
     }
 
     /// Clubs on a Season dashboard: every club whose span covers the

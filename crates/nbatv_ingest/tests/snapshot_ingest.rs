@@ -132,6 +132,7 @@ fn snapshot_crawl_fills_the_archive_and_reingest_is_a_noop() {
         "NYK, TRH, PHI — PIT's slugless row is skipped"
     );
     assert_eq!(first.games, 2);
+    assert_eq!(first.regular_fallback_games, 2);
     assert_eq!(first.games_with_box, 1);
     assert_eq!(first.games_without_box, 1);
     assert_eq!(first.games_mismatched, 0);

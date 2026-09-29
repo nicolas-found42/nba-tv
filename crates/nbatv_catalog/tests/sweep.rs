@@ -5,10 +5,14 @@
 //! linked here are [`ScriptedProbe`] and the quota-gating fake below.
 
 use nbatv_catalog::{
-    game_context_for, review_list, sweep_game, sweep_status_for, GameContext, PolitenessConfig,
-    ProbeCandidate, ProbeOutcome, ProbeRegistry, ScriptedProbe, SourceProbe, SweepStatus,
+    game_context_for, rank_candidates, reconcile_candidate_level, review_list,
+    review_list_with_judge, sweep_game, sweep_game_with_judge, sweep_status_for, CandidateVerdict,
+    CollectorNoteInput, CrawlFailureChoice, DisabledJevJudge, FileSelectionInput, GameContext,
+    GameTypeChoice, HtmlRowChoice, JevError, JevJudge, PolitenessConfig, ProbeCandidate,
+    ProbeOutcome, ProbeRegistry, ScriptedProbe, SearchTemplateSelection, SourceProbe, SweepStatus,
+    TeamChoice,
 };
-use nbatv_db::{create_schema, insert_game, GameRow};
+use nbatv_db::{create_schema, insert_game, GameQuery, GameRow};
 use nbatv_ladder::YoutubeQuota;
 use rusqlite::Connection;
 use std::time::Duration;
@@ -139,6 +143,267 @@ fn reject_probes() -> (
         scripted(3, reject_evidence()),
         scripted(4, reject_evidence()),
     )
+}
+
+fn no_priority(_: &[String]) -> Result<Option<u8>, JevError> {
+    Ok(None)
+}
+
+fn prioritize_second(items: &[String]) -> Result<Option<u8>, JevError> {
+    Ok(Some(
+        items
+            .first()
+            .is_some_and(|item| item.contains("second"))
+            .then_some(3)
+            .unwrap_or(1),
+    ))
+}
+
+fn fail_priority(_: &[String]) -> Result<Option<u8>, JevError> {
+    Err(JevError::Transport("review test failure".to_owned()))
+}
+
+fn invalid_priority(_: &[String]) -> Result<Option<u8>, JevError> {
+    Ok(Some(4))
+}
+
+type PriorityResult = Result<Option<u8>, JevError>;
+
+struct CandidatePolicyJudge {
+    fail: bool,
+    priority: fn(&[String]) -> PriorityResult,
+}
+
+impl JevJudge for CandidatePolicyJudge {
+    fn select_file(
+        &self,
+        _: &FileSelectionInput,
+    ) -> Result<Option<nbatv_catalog::FileSelection>, JevError> {
+        Ok(None)
+    }
+
+    fn match_candidate(
+        &self,
+        _: &GameContext,
+        candidate: &ProbeCandidate,
+    ) -> Result<Option<CandidateVerdict>, JevError> {
+        if self.fail {
+            return Err(JevError::Transport("candidate test failure".to_owned()));
+        }
+        Ok(Some(CandidateVerdict {
+            same_game: Some(candidate.url_or_pointer != "contradiction"),
+            both_teams: Some(true),
+            date_or_round: Some(true),
+            full_game: Some(true),
+            quality: Some(3.0),
+            decisive: true,
+        }))
+    }
+
+    fn classify_game_type(&self, _: &GameTypeChoice) -> Result<Option<String>, JevError> {
+        Ok(None)
+    }
+
+    fn align_team(&self, _: &TeamChoice) -> Result<Option<String>, JevError> {
+        Ok(None)
+    }
+
+    fn match_collector_note(&self, _: &CollectorNoteInput) -> Result<Option<String>, JevError> {
+        Ok(None)
+    }
+
+    fn choose_search_template(
+        &self,
+        _: &GameContext,
+        _: &str,
+    ) -> Result<Option<SearchTemplateSelection>, JevError> {
+        Ok(None)
+    }
+
+    fn classify_crawl_failure(&self, _: &str) -> Result<Option<CrawlFailureChoice>, JevError> {
+        Ok(None)
+    }
+
+    fn classify_html_row(&self, _: &str, _: &str) -> Result<Option<HtmlRowChoice>, JevError> {
+        Ok(None)
+    }
+
+    fn route_shell_command(&self, _: &str) -> Result<Option<String>, JevError> {
+        Ok(None)
+    }
+
+    fn prioritize_review(&self, items: &[String], _: &str) -> Result<Option<u8>, JevError> {
+        (self.priority)(items)
+    }
+}
+
+#[test]
+fn candidate_contradiction_demotes_but_never_promotes() {
+    let mut likely = likely_evidence();
+    likely.url_or_pointer = "contradiction".to_owned();
+    let reject = reject_evidence();
+    let candidates = vec![likely.clone(), reject.clone()];
+
+    let ranked = rank_candidates(
+        &ctx(),
+        &candidates,
+        &CandidatePolicyJudge {
+            fail: false,
+            priority: no_priority,
+        },
+    );
+
+    assert_eq!(ranked[0].index, 0);
+    assert_eq!(ranked[0].level, nbatv_ladder::MatchLevel::Review);
+    assert_eq!(ranked[1].index, 1);
+    assert_eq!(ranked[1].level, nbatv_ladder::MatchLevel::Reject);
+    assert_eq!(
+        reconcile_candidate_level(nbatv_ladder::MatchLevel::Confirmed, None),
+        nbatv_ladder::MatchLevel::Confirmed
+    );
+}
+
+#[test]
+fn sweep_demotes_an_explicitly_contradicted_candidate() {
+    let conn = seeded_conn();
+    let mut contradicted = confirmed_evidence();
+    contradicted.url_or_pointer = "contradiction".to_owned();
+    let p0 = scripted(0, contradicted);
+    let (_, p1, p2, p3, p4) = reject_probes();
+    let reg = all_reject_registry(&p0, &p1, &p2, &p3, &p4);
+    let mut quota = quota();
+
+    let report = sweep_game_with_judge(
+        &conn,
+        &ctx(),
+        &reg,
+        &polite(),
+        &mut quota,
+        T0,
+        &CandidatePolicyJudge {
+            fail: false,
+            priority: no_priority,
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(report.status, SweepStatus::Unavailable { .. }));
+    let queries = nbatv_db::game_queries_for(&conn, GAME_ID).unwrap();
+    assert_eq!(queries[0].best_match_level, "review");
+    assert_eq!(queries[0].review_url.as_deref(), Some("contradiction"));
+    assert!(nbatv_db::tape_sources_for(&conn, GAME_ID)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn candidate_jev_error_preserves_deterministic_sweep() {
+    let conn = seeded_conn();
+    let p0 = scripted(0, likely_evidence());
+    let mut reg = ProbeRegistry::new();
+    reg.register(&p0);
+    let mut quota = quota();
+
+    let report = sweep_game_with_judge(
+        &conn,
+        &ctx(),
+        &reg,
+        &polite(),
+        &mut quota,
+        T0,
+        &CandidatePolicyJudge {
+            fail: true,
+            priority: no_priority,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.status, SweepStatus::Playable { rank: 0 });
+    let queries = nbatv_db::game_queries_for(&conn, GAME_ID).unwrap();
+    assert_eq!(queries[0].best_match_level, "likely");
+    assert_eq!(nbatv_db::tape_sources_for(&conn, GAME_ID).unwrap().len(), 1);
+}
+
+#[test]
+fn review_priority_reorders_in_memory_without_changing_queries() {
+    let conn = seeded_conn();
+    for (rung, query_text) in [(0, "first"), (1, "second")] {
+        nbatv_db::upsert_game_query(
+            &conn,
+            &GameQuery {
+                game_id: GAME_ID.to_owned(),
+                rung,
+                query_text: query_text.to_owned(),
+                queried_at: T0.to_owned(),
+                best_match_level: "review".to_owned(),
+                review_url: Some(format!("https://example.com/{query_text}")),
+                review_title: Some(query_text.to_owned()),
+            },
+        )
+        .unwrap();
+    }
+    let before = nbatv_db::game_queries_for(&conn, GAME_ID).unwrap();
+
+    let ranked = review_list_with_judge(
+        &conn,
+        GAME_ID,
+        &CandidatePolicyJudge {
+            fail: false,
+            priority: prioritize_second,
+        },
+        "which candidate deserves review first?",
+    )
+    .unwrap();
+
+    assert_eq!(
+        ranked.iter().map(|item| item.rung).collect::<Vec<_>>(),
+        vec![1, 0]
+    );
+    assert_eq!(nbatv_db::game_queries_for(&conn, GAME_ID).unwrap(), before);
+}
+
+#[test]
+fn disabled_failed_or_invalid_review_priority_preserves_order() {
+    let conn = seeded_conn();
+    for rung in 0..2 {
+        nbatv_db::upsert_game_query(
+            &conn,
+            &GameQuery {
+                game_id: GAME_ID.to_owned(),
+                rung,
+                query_text: format!("query-{rung}"),
+                queried_at: T0.to_owned(),
+                best_match_level: "review".to_owned(),
+                review_url: Some(format!("https://example.com/{rung}")),
+                review_title: Some(format!("candidate-{rung}")),
+            },
+        )
+        .unwrap();
+    }
+    let expected = vec![0, 1];
+    let order = |judge: &dyn JevJudge| {
+        review_list_with_judge(&conn, GAME_ID, judge, "")
+            .unwrap()
+            .into_iter()
+            .map(|item| item.rung)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(order(&DisabledJevJudge), expected);
+    assert_eq!(
+        order(&CandidatePolicyJudge {
+            fail: false,
+            priority: fail_priority,
+        }),
+        expected
+    );
+    assert_eq!(
+        order(&CandidatePolicyJudge {
+            fail: false,
+            priority: invalid_priority,
+        }),
+        expected
+    );
 }
 
 // ---- Acceptance: first LIKELY-or-better wins, sweep stops ascending --------

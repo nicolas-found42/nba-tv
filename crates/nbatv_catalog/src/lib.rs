@@ -16,6 +16,7 @@
 pub mod drive;
 pub mod fetch;
 pub mod ia_probe;
+pub mod jev;
 pub mod nba_probe;
 pub mod politeness;
 pub mod probe;
@@ -30,9 +31,10 @@ pub use drive::{
     MirrorOutcome, MirrorReport, RcloneMirror, RcloneOutput,
 };
 pub use runner::{
-    ending_year_to_slug, expand_season_range, parse_argv, run_backfill, season_slug_to_ending_year,
-    usage, BackfillConfig, BackfillPorts, BackfillReport, RunnerArgs, RunnerError, DEFAULT_DB_PATH,
-    DEFAULT_MANIFEST_PATH, DEFAULT_MAX_RETRIES, EXIT_OK, EXIT_RUN, EXIT_USAGE,
+    ending_year_to_slug, expand_season_range, parse_argv, run_backfill, run_backfill_with_judge,
+    season_slug_to_ending_year, usage, BackfillConfig, BackfillPorts, BackfillReport, RunnerArgs,
+    RunnerError, DEFAULT_DB_PATH, DEFAULT_MANIFEST_PATH, DEFAULT_MAX_RETRIES, EXIT_OK, EXIT_RUN,
+    EXIT_USAGE,
 };
 
 pub use fetch::{
@@ -42,6 +44,13 @@ pub use fetch::{
     MIN_GAME_SECS, RETRY_PAUSE,
 };
 pub use ia_probe::{IaError, IaHttp, IaProbe};
+pub use jev::{
+    CandidateVerdict, ChoiceResult, CollectorNoteInput, CrawlFailureChoice, DirectHttpJev,
+    DisabledJevJudge, FileSelection, FileSelectionInput, GameTypeChoice, HtmlRowChoice, JevChoice,
+    JevConfidence, JevError, JevJudge, JevNoul, JevQuestion, JevRequest, JevResponse, JevScore,
+    ReviewPriority, SearchTemplate, SearchTemplateSelection, TeamChoice, API_URL,
+    DEFAULT_THRESHOLD, MODEL, OPENROUTER_API_URL,
+};
 pub use nba_probe::{
     finals_for_season, finals_month_ok, nba_catalog_due, nba_rescan_hint, season_for_date,
     FinalsEntry, NbaProbe, FINALS_CATALOG, NBA_CATALOG_REFRESH_DAYS, NBA_CATALOG_VERIFIED,
@@ -55,7 +64,9 @@ pub use probe::{
 pub use rung4_probe::{rung4_query_text, Rung4Probe};
 pub use scorer::{confidence_for, level_to_str, parse_level, score_candidate};
 pub use sweep::{
-    game_context_for, review_list, review_list_all, rung_name, sweep_game, sweep_status_for,
-    sweep_status_from, ReviewItem, SweepError, SweepReport,
+    game_context_for, prioritize_reviews, rank_candidates, reconcile_candidate_level, review_list,
+    review_list_all, review_list_all_with_judge, review_list_with_judge, rung_name, sweep_game,
+    sweep_game_with_judge, sweep_status_for, sweep_status_from, CandidateRank, ReviewItem,
+    SweepError, SweepReport,
 };
 pub use ytdlp_probe::{registry_with_ytdlp, YtdlpProbe};
