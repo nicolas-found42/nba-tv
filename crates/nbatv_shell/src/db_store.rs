@@ -64,13 +64,21 @@ impl DbStore {
         Ok(Self { conn })
     }
 
-    /// Hermetic empty archive: no filesystem. Pure-logic tests use this.
-    pub fn in_memory() -> Self {
-        let conn = nbatv_db::open_in_memory().expect("in-memory archive db must open");
+    /// Hermetic empty archive: no filesystem. Pure-logic tests reach this
+    /// through [`Store::in_memory`] (which degrades to [`Store::Empty`] on
+    /// the impossible open failure), never directly.
+    fn in_memory() -> Option<Self> {
+        let conn = match nbatv_db::open_in_memory() {
+            Ok(conn) => conn,
+            Err(err) => {
+                eprintln!("archive db: in-memory open failed ({err}); running empty");
+                return None;
+            }
+        };
         if let Err(err) = nbatv_db::create_schema(&conn) {
             eprintln!("archive db: schema setup failed on in-memory db ({err})");
         }
-        Self { conn }
+        Some(Self { conn })
     }
 
     /// Take ownership of an already-opened connection (headless db tests
@@ -189,15 +197,22 @@ impl DbStore {
     /// one-time sign-in prompt when a run finds no remote.
     pub fn mirror_status_line(&self) -> Option<String> {
         let ready = nbatv_db::ready_cache_entries(&self.conn).ok()?;
-        if ready.is_empty() {
-            Some("Drive mirror: idle — no Ready files to upload.".to_owned())
-        } else {
-            let n = ready.len();
-            Some(format!(
-                "Drive mirror: {n} Ready file{} awaiting upload — dry-run first, then apply.",
-                if n == 1 { "" } else { "s" }
-            ))
-        }
+        Some(mirror_status_line_for(ready.len()))
+    }
+
+    /// Sign-ins section lines for story #24: which stage needs which
+    /// credential, in one place. No subprocess, no rclone call — the Drive
+    /// mirror row reports the requirement and the exact external sign-in
+    /// prompt (the runner prints the same text), with remote presence
+    /// "unknown" until a mirror run reports it; webview sign-ins are
+    /// described where they happen. Degrades to the requirement-only lines
+    /// when the cache read fails (the sign-in requirement itself still
+    /// holds, so it stays on the panel).
+    pub fn sign_ins_section(&self) -> Vec<SignInLine> {
+        let mirror_entries = nbatv_db::ready_cache_entries(&self.conn)
+            .map(|ready| mirror_sign_in_line(ready.len()))
+            .unwrap_or_else(|_| mirror_sign_in_line_unknown());
+        vec![mirror_entries, webview_sign_in_line()]
     }
 
     pub fn game(&self, game_id: &str) -> Option<Game> {
@@ -415,7 +430,7 @@ impl DbStore {
                 season_year(&s.slug)
                     .map(|end| end - 1)
                     .and_then(|start| u16::try_from(start).ok())
-                    .map_or(false, |y| team.active_in(y))
+                    .is_some_and(|y| team.active_in(y))
             })
             .map(|s| s.slug.clone())
             .unwrap_or_else(|| "1946-47".to_string())
@@ -451,18 +466,119 @@ impl DbStore {
     }
 }
 
+/// Compact Drive-mirror input line for the Season view, derived purely from
+/// the Ready-row count (unit-tested; `mirror_status_line` reads the db and
+/// calls this).
+pub fn mirror_status_line_for(ready: usize) -> String {
+    if ready == 0 {
+        "Drive mirror: idle — no Ready files to upload.".to_owned()
+    } else {
+        format!(
+            "Drive mirror: {ready} Ready file{} awaiting upload — dry-run first, then apply.",
+            if ready == 1 { "" } else { "s" }
+        )
+    }
+}
+
+/// One row of the Sign-ins panel (story #24): the stage, where its
+/// credential lives, and the current state of that requirement. Pure data —
+/// the panel renders these lines verbatim, and unit tests assert on them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignInLine {
+    /// Stage name, e.g. `Drive mirror`.
+    pub stage: &'static str,
+    /// Which credential the stage needs and where it lives.
+    pub credential: &'static str,
+    /// Current requirement state (`present` / `missing` / `unknown`).
+    pub state: &'static str,
+    /// The detail line: the requirement or the exact sign-in prompt.
+    pub detail: String,
+}
+
+/// Sign-ins row for the Drive mirror stage: the one-time `rclone config`
+/// sign-in. `ready` counts the mirror's input files this store can see.
+/// Presence of the `nbatv-drive` remote is never probed here — the shell
+/// runs no subprocess per frame — so state is "unknown" until a mirror run
+/// reports `RemoteMissing`; the exact prompt text comes from
+/// [`nbatv_catalog::drive_sign_in_prompt`] so the panel and the runner
+/// cannot drift.
+pub fn mirror_sign_in_line(ready: usize) -> SignInLine {
+    let files = if ready == 0 {
+        "no Ready files to upload".to_owned()
+    } else {
+        format!(
+            "{ready} Ready file{} awaiting upload",
+            if ready == 1 { "" } else { "s" }
+        )
+    };
+    SignInLine {
+        stage: "Drive mirror",
+        credential: "rclone remote `nbatv-drive` (your Google account)",
+        state: "unknown",
+        detail: format!(
+            "Drive mirror: one-time sign-in needed — {files}; runner prompt: {}",
+            nbatv_catalog::drive_sign_in_prompt(&nbatv_catalog::MirrorConfig::default())
+        ),
+    }
+}
+
+/// Drive mirror row when the cache read itself fails: the requirement is
+/// unchanged, so the row stays, with no file count claimed.
+pub fn mirror_sign_in_line_unknown() -> SignInLine {
+    SignInLine {
+        detail: format!(
+            "Drive mirror: one-time sign-in needed; runner prompt: {}",
+            nbatv_catalog::drive_sign_in_prompt(&nbatv_catalog::MirrorConfig::default())
+        ),
+        ..mirror_sign_in_line(0)
+    }
+}
+
+/// Sign-ins row for Lane B webview sessions: vendor sign-ins (age gates)
+/// complete inside the embed webview; cookies stay confined to
+/// [`crate::embed::WEBVIEW_PROFILE_DIR`] and out of the repo. Nothing to
+/// set up outside the app — the row tells the archivist where it happens.
+pub fn webview_sign_in_line() -> SignInLine {
+    SignInLine {
+        stage: "Webview sessions",
+        credential: "vendor sign-in (age gate), inside the embed player",
+        state: "in-webview",
+        detail: format!(
+            "Webview sessions: vendor sign-ins (e.g. age gates) complete inside the Lane B webview; \
+             cookies stay in {} and never enter the repo.",
+            crate::embed::WEBVIEW_PROFILE_DIR
+        ),
+    }
+}
+
 /// The catalog behind every Shell screen: the archive database in
 /// production, fixed fixtures for tests and offline development only.
 pub enum Store {
     Fixture(FixtureStore),
     Db(DbStore),
+    /// The archive could not be opened at all — reachable only if even
+    /// in-memory SQLite fails to open (never observed). Every query
+    /// degrades to its empty value, mirroring the db error paths, so the
+    /// Shell has a no-panic path even here instead of an `expect`.
+    Empty,
 }
 
 impl Store {
+    /// Hermetic empty archive: the in-memory database when it opens (the
+    /// case in practice), [`Store::Empty`] otherwise. Pure-logic headless
+    /// tests use this through `ShellApp::empty`.
+    pub fn in_memory() -> Self {
+        match DbStore::in_memory() {
+            Some(db) => Self::Db(db),
+            None => Self::Empty,
+        }
+    }
+
     pub fn seasons(&self) -> Vec<Season> {
         match self {
             Store::Fixture(s) => s.seasons().to_vec(),
             Store::Db(s) => s.seasons(),
+            Store::Empty => Vec::new(),
         }
     }
 
@@ -470,6 +586,7 @@ impl Store {
         match self {
             Store::Fixture(s) => s.season_label(slug),
             Store::Db(s) => s.season_label(slug),
+            Store::Empty => None,
         }
     }
 
@@ -477,6 +594,7 @@ impl Store {
         match self {
             Store::Fixture(s) => s.team_name(slug),
             Store::Db(s) => s.team_name(slug),
+            Store::Empty => None,
         }
     }
 
@@ -484,6 +602,7 @@ impl Store {
         match self {
             Store::Fixture(s) => s.game(game_id).cloned(),
             Store::Db(s) => s.game(game_id),
+            Store::Empty => None,
         }
     }
 
@@ -491,6 +610,7 @@ impl Store {
         match self {
             Store::Fixture(s) => s.games_for_season(season).into_iter().cloned().collect(),
             Store::Db(s) => s.games_for_season(season),
+            Store::Empty => Vec::new(),
         }
     }
 
@@ -498,6 +618,7 @@ impl Store {
         match self {
             Store::Fixture(s) => s.teams_for_season(season).into_iter().cloned().collect(),
             Store::Db(s) => s.teams_for_season(season),
+            Store::Empty => Vec::new(),
         }
     }
 
@@ -505,6 +626,7 @@ impl Store {
         match self {
             Store::Fixture(s) => s.filter_teams(season, query).into_iter().cloned().collect(),
             Store::Db(s) => s.filter_teams(season, query),
+            Store::Empty => Vec::new(),
         }
     }
 
@@ -518,6 +640,7 @@ impl Store {
                 )
             }
             Store::Db(s) => s.team_games(season, team),
+            Store::Empty => (Vec::new(), Vec::new()),
         }
     }
 
@@ -525,6 +648,10 @@ impl Store {
         match self {
             Store::Fixture(s) => s.season_counts(season),
             Store::Db(s) => s.season_counts(season),
+            Store::Empty => SeasonCounts {
+                seeded: 0,
+                playable: 0,
+            },
         }
     }
 
@@ -532,6 +659,7 @@ impl Store {
         match self {
             Store::Fixture(s) => s.box_for(game_id).cloned(),
             Store::Db(s) => s.box_for(game_id),
+            Store::Empty => None,
         }
     }
 
@@ -539,6 +667,7 @@ impl Store {
         match self {
             Store::Fixture(s) => s.palette_search(query),
             Store::Db(s) => s.palette_search(query),
+            Store::Empty => Vec::new(),
         }
     }
 
@@ -549,6 +678,7 @@ impl Store {
                 .map(sweep_status_for_fixture)
                 .unwrap_or(SweepStatus::Sweeping),
             Store::Db(s) => s.sweep_status(game_id),
+            Store::Empty => SweepStatus::Sweeping,
         }
     }
 
@@ -556,6 +686,7 @@ impl Store {
         match self {
             Store::Fixture(_) => Vec::new(),
             Store::Db(s) => s.review_list(game_id),
+            Store::Empty => Vec::new(),
         }
     }
 
@@ -566,6 +697,7 @@ impl Store {
         match self {
             Store::Fixture(_) => None,
             Store::Db(s) => s.ready_cache_entry(game_id),
+            Store::Empty => None,
         }
     }
 
@@ -574,6 +706,7 @@ impl Store {
         match self {
             Store::Fixture(_) => None,
             Store::Db(s) => s.cache_status_line(game_id),
+            Store::Empty => None,
         }
     }
 
@@ -583,6 +716,20 @@ impl Store {
         match self {
             Store::Fixture(_) => None,
             Store::Db(s) => s.mirror_status_line(),
+            Store::Empty => None,
+        }
+    }
+
+    /// Sign-ins section (story #24) for whichever backing store is live.
+    /// Fixtures and the empty archive still list both requirements — the
+    /// credential stages exist regardless of what is seeded — so the panel
+    /// renders in every build; the db path fills in its file counts.
+    pub fn sign_ins_section(&self) -> Vec<SignInLine> {
+        match self {
+            Store::Fixture(_) | Store::Empty => {
+                vec![mirror_sign_in_line(0), webview_sign_in_line()]
+            }
+            Store::Db(s) => s.sign_ins_section(),
         }
     }
 }
@@ -943,5 +1090,78 @@ mod tests {
             line.contains("dry-run"),
             "the line points at preview-before-apply: {line}"
         );
+    }
+
+    #[test]
+    fn mirror_sign_in_line_names_remote_and_prompt() {
+        let line = mirror_sign_in_line(0);
+        assert_eq!(line.stage, "Drive mirror");
+        assert_eq!(line.state, "unknown");
+        assert!(line.credential.contains("nbatv-drive"));
+        // Exact prompt text shared with the catalog runner.
+        assert!(
+            line.detail.contains("rclone config"),
+            "the detail carries the one-time sign-in prompt: {}",
+            line.detail
+        );
+        assert!(
+            line.detail.contains("The app never touches credentials"),
+            "the prompt is the catalog's exact text: {}",
+            line.detail
+        );
+    }
+
+    #[test]
+    fn mirror_sign_in_line_counts_ready_files() {
+        let line = mirror_sign_in_line(1);
+        assert!(line.detail.contains("1 Ready file"), "{}", line.detail);
+        assert!(!line.detail.contains("files"), "{}", line.detail);
+        let line = mirror_sign_in_line(3);
+        assert!(line.detail.contains("3 Ready files"), "{}", line.detail);
+    }
+
+    #[test]
+    fn mirror_sign_in_line_unknown_omits_the_count() {
+        let line = mirror_sign_in_line_unknown();
+        assert_eq!(line.stage, "Drive mirror");
+        assert!(
+            !line.detail.contains("Ready file"),
+            "no count is claimed when the cache read failed: {}",
+            line.detail
+        );
+        assert!(line.detail.contains("rclone config"));
+    }
+
+    #[test]
+    fn webview_sign_in_line_names_webview_profile() {
+        let line = webview_sign_in_line();
+        assert_eq!(line.stage, "Webview sessions");
+        assert_eq!(line.state, "in-webview");
+        assert!(
+            line.detail.contains(crate::embed::WEBVIEW_PROFILE_DIR),
+            "the row says where session cookies live: {}",
+            line.detail
+        );
+        assert!(
+            line.detail.contains("never enter the repo"),
+            "the repo-hygiene promise is on the panel: {}",
+            line.detail
+        );
+    }
+
+    #[test]
+    fn sign_ins_section_lists_both_stages_from_any_store() {
+        // Db path (in-memory archive).
+        let store = Store::Db(DbStore::from_connection(memdb()));
+        let lines = store.sign_ins_section();
+        let stages: Vec<_> = lines.iter().map(|l| l.stage).collect();
+        assert_eq!(stages, ["Drive mirror", "Webview sessions"]);
+        // Fixture path renders the panel too (no counts claimed).
+        let lines = Store::Fixture(FixtureStore::fixture()).sign_ins_section();
+        assert_eq!(lines[0].stage, "Drive mirror");
+        assert_eq!(lines[1].stage, "Webview sessions");
+        // Empty archive: same two requirement rows.
+        let lines = Store::Empty.sign_ins_section();
+        assert_eq!(lines.len(), 2);
     }
 }
