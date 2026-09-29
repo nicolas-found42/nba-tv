@@ -1,8 +1,10 @@
 [package]
 name = "nbatv_ingest"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+rust-version.workspace = true
 description = "Bootstrap ingest for the nba-tv personal NBA archive (FTE CSV, validators, snapshot ingest into the archive db)"
+license = "MIT"
 
 [dependencies]
 nbatv_db = { path = "../nbatv_db" }
