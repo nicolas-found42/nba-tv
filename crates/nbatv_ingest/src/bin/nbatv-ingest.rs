@@ -15,9 +15,11 @@
 //! files already on disk and writes the one db file.
 //!
 //! Honesty notes (mirrored on [`nbatv_ingest::ingest_snapshot_dir`]):
-//! every `game_type` is `REGULAR` (the snapshots carry no round marker),
-//! `ot`/`arena`/`attendance` are NULL, and games without a box snapshot
-//! stay as bare 0-0 schedule rows until a later crawl upgrades them.
+//! `game_type` is `PLAYOFFS` exactly when the box snapshot carries BR's
+//! postseason marker (`game_summaries playoffs`), bare schedule rows stay
+//! `REGULAR` until their snapshot lands, `ot`/`arena`/`attendance` are NULL,
+//! and games without a box snapshot stay as bare 0-0 schedule rows until a
+//! later crawl upgrades them.
 
 use nbatv_ingest::ingest_snapshot_dir;
 use std::path::PathBuf;
@@ -63,7 +65,12 @@ fn parse_argv(argv: &[String]) -> Result<Args, String> {
         match flag {
             "--raw" => args.raw = PathBuf::from(value),
             "--db" => args.db = PathBuf::from(value),
-            _ => unreachable!("flag matched the takes-value set above"),
+            _ => {
+                return Err(format!(
+                    "{flag} needs a value (internal dispatch mismatch)\n{}",
+                    usage()
+                ))
+            }
         }
     }
     Ok(args)

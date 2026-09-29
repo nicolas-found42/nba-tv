@@ -261,10 +261,10 @@ fn orphan_box_page_is_counted_and_ignored() {
 mod temp {
     use std::path::{Path, PathBuf};
 
-    pub struct TempDir(PathBuf);
+    pub(crate) struct TempDir(PathBuf);
 
     impl TempDir {
-        pub fn path(&self) -> &Path {
+        pub(crate) fn path(&self) -> &Path {
             &self.0
         }
     }
@@ -275,7 +275,7 @@ mod temp {
         }
     }
 
-    pub fn temp_dir(name: &str) -> TempDir {
+    pub(crate) fn temp_dir(name: &str) -> TempDir {
         let dir = std::env::temp_dir().join(format!("nbatv-ingest-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         TempDir(dir)

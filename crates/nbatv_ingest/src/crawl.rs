@@ -39,11 +39,11 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::{
-    fetch_season_with_sleeper_at, league_for_ending_year, parse_games_page, raw_snapshot_path,
-    read_snapshot_page, validate_game_id, FetchClient, FetchError, FetchJob, FetchReport,
-    IngestError, PageRevision,
-};
+use crate::br_html::{parse_games_page, MONTHS};
+use crate::csv::{raw_snapshot_path, validate_game_id};
+use crate::fetch::{fetch_season_with_sleeper_at, FetchClient, FetchError, FetchJob, FetchReport};
+use crate::snapshot::{league_for_ending_year, read_snapshot_page};
+use crate::{IngestError, PageRevision};
 
 /// First season-ending year with a BR league-year page: 1946-47 (BAA).
 pub const FIRST_SEASON: i32 = 1947;
@@ -87,7 +87,7 @@ pub fn phase_one_jobs(ending: i32) -> Vec<FetchJob> {
 
 /// `11` -> `november`, the BR split-page suffix.
 fn month_name(month: u32) -> Option<&'static str> {
-    crate::MONTHS
+    MONTHS
         .iter()
         .find(|(_, n)| *n == month as i32)
         .map(|(name, _)| *name)
@@ -109,7 +109,7 @@ fn split_months_linked(schedule_html: &str) -> BTreeSet<u32> {
         rest = &rest[at + "_games-".len()..];
         let name_end = rest.find('.').unwrap_or(rest.len());
         let name = &rest[..name_end];
-        if let Some((_, number)) = crate::MONTHS.iter().find(|(n, _)| *n == name) {
+        if let Some((_, number)) = MONTHS.iter().find(|(n, _)| *n == name) {
             months.insert(*number as u32);
         }
     }
@@ -455,7 +455,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{season_slug_to_ending_year, write_snapshot_gz, FETCH_MIN_INTERVAL};
+    use crate::snapshot::season_slug_to_ending_year;
+    use crate::{write_snapshot_gz, FETCH_MIN_INTERVAL};
 
     #[test]
     fn season_slug_matches_the_ingest_reader_through_the_century_rollover() {

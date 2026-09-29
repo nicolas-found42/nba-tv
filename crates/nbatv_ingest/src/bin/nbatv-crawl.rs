@@ -26,12 +26,13 @@
 //!
 //! Etiquette: requests are spaced by `--interval` (default 3.5 s; BR
 //! robots.txt sets Crawl-delay 3) and seasons run `--workers` at a time, so
-//! the aggregate rate is workers / interval. At the default the full
-//! 80-season archive is ~77k requests — days; lower the interval or raise
-//! the worker count to trade throttling risk for speed (your call, your
-//! IP — measured 2026-09-08: ~2 req/s sustained drew 429s within minutes).
-//! Use `--from`/`--to` to run it in waves; every wave resumes where the
-//! last stopped.
+//! the aggregate rate is workers / interval. Research for #13 measured
+//! ~20 req/min as BR's comfort ceiling (~2 req/s sustained drew 429s within
+//! minutes), so `--workers` is clamped to 1..=4 and the run warns when more
+//! than one worker multiplies the aggregate rate. At the default (1 worker,
+//! 3.5 s) the full 80-season archive is ~77k requests — days. Use
+//! `--from`/`--to` to run it in waves; every wave resumes where the last
+//! stopped.
 
 use nbatv_ingest::crawl::{
     crawl_season, pending_jobs, season_slug, SeasonCrawl, FIRST_SEASON, LAST_COMPLETED_SEASON,
@@ -46,6 +47,20 @@ use std::time::Duration;
 const EXIT_OK: u8 = 0;
 const EXIT_RUN: u8 = 1;
 const EXIT_USAGE: u8 = 2;
+
+/// Upper bound on concurrent season crawlers. The aggregate request rate is
+/// `workers / interval`; research-13 measured BR throttling (~20 req/min
+/// comfortable, 429s within minutes at ~2 req/s), so beyond 4 workers even a
+/// polite 3.5 s interval crosses the ceiling (4/3.5s ≈ 69 req/min). The cap
+/// keeps the foot-gun small rather than removing it: lower `--interval`
+/// still raises the rate (that trade stays the caller's).
+const MAX_WORKERS: usize = 4;
+
+/// Clamp a requested worker count to the safe range `1..=MAX_WORKERS`.
+/// Pure so the cap stays unit-testable.
+fn clamp_workers(requested: usize) -> usize {
+    requested.clamp(1, MAX_WORKERS)
+}
 
 const DEFAULT_ROOT: &str = ".";
 const SOURCE: &str = "br";
@@ -65,15 +80,15 @@ struct Args {
     root: PathBuf,
     /// Minimum seconds between two requests (per worker).
     interval_secs: f64,
-    /// Seasons crawled concurrently. The aggregate request rate is
-    /// workers / interval — you own the decision to exceed BR's
-    /// robots.txt Crawl-delay 3.
+    /// Seasons crawled concurrently (clamped to `1..=MAX_WORKERS`). The
+    /// aggregate request rate is workers / interval — you own the decision
+    /// to exceed BR's robots.txt Crawl-delay 3.
     workers: usize,
 }
 
 fn usage() -> String {
     format!(
-        "usage: nbatv-crawl [--from ENDING] [--to ENDING] [--no-monthly] [--dry-run] [--root DIR] [--interval SECS] [--workers N]\n  --from ENDING     first season-ending year (default {FIRST_SEASON} = 1946-47)\n  --to ENDING       last season-ending year (default {LAST_COMPLETED_SEASON} = 2025-26)\n  --no-monthly      skip monthly schedule split pages (redundant with the full page)\n  --dry-run         list pending requests and pacing estimate, no network\n  --root DIR        project root holding data/ (default {DEFAULT_ROOT}); snapshots land at DIR/data/raw/br/<season>/\n  --interval SECS   minimum seconds between requests per worker (default 3.5 = BR robots.txt Crawl-delay 3 + margin; lower is your call, throttling risk is yours)\n  --workers N       seasons crawled concurrently (default 1; aggregate rate = N / interval)"
+        "usage: nbatv-crawl [--from ENDING] [--to ENDING] [--no-monthly] [--dry-run] [--root DIR] [--interval SECS] [--workers N]\n  --from ENDING     first season-ending year (default {FIRST_SEASON} = 1946-47)\n  --to ENDING       last season-ending year (default {LAST_COMPLETED_SEASON} = 2025-26)\n  --no-monthly      skip monthly schedule split pages (redundant with the full page)\n  --dry-run         list pending requests and pacing estimate, no network\n  --root DIR        project root holding data/ (default {DEFAULT_ROOT}); snapshots land at DIR/data/raw/br/<season>/\n  --interval SECS   minimum seconds between requests per worker (default 3.5 = BR robots.txt Crawl-delay 3 + margin; lower is your call, throttling risk is yours)\n  --workers N       seasons crawled concurrently, clamped to 1..=4 (default 1; aggregate rate = N / interval)"
     )
 }
 
@@ -120,7 +135,12 @@ fn parse_argv(argv: &[String]) -> Result<Args, String> {
                             format!("{flag}: {value:?} is not a worker count\n{}", usage())
                         })?;
                     }
-                    _ => unreachable!("flag matched the takes-value set above"),
+                    _ => {
+                        return Err(format!(
+                            "{flag} needs a value (internal dispatch mismatch)\n{}",
+                            usage()
+                        ))
+                    }
                 }
             }
             "--no-monthly" => args.monthly = false,
@@ -150,13 +170,7 @@ fn parse_argv(argv: &[String]) -> Result<Args, String> {
             usage()
         ));
     }
-    if args.workers == 0 || args.workers > 8 {
-        return Err(format!(
-            "--workers {} must be 1..=8\n{}",
-            args.workers,
-            usage()
-        ));
-    }
+    args.workers = clamp_workers(args.workers);
     Ok(args)
 }
 
@@ -292,6 +306,14 @@ fn dry_run(args: &Args) -> Result<(), String> {
 }
 
 fn run(args: &Args) -> Result<(), String> {
+    if args.workers > 1 {
+        eprintln!(
+            "note: {} workers raise the aggregate request rate to workers/interval              (~{:.0} req/min at {:.1} s/request) — research-13 measured BR throttling              beyond ~20 req/min",
+            args.workers,
+            args.workers as f64 * 60.0 / args.interval_secs,
+            args.interval_secs
+        );
+    }
     let interval = Duration::from_secs_f64(args.interval_secs);
     let endings: Vec<i32> = (args.from..=args.to).collect();
     // Season-level parallelism: exactly `workers` threads, each taking a
@@ -448,8 +470,27 @@ mod tests {
             parse_argv(&["--to".into(), "1950".into(), "--from".into(), "1980".into()]).is_err()
         );
         assert!(parse_argv(&["--interval".into(), "0".into()]).is_err());
-        assert!(parse_argv(&["--workers".into(), "9".into()]).is_err());
         assert!(parse_argv(&["--bogus".into()]).is_err());
+
+        // `--workers` is clamped, not rejected: 0 and 9 land inside 1..=4.
+        let clamped = parse_argv(&["--workers".into(), "9".into()]).unwrap();
+        assert_eq!(clamped.workers, MAX_WORKERS);
+        let clamped = parse_argv(&["--workers".into(), "0".into()]).unwrap();
+        assert_eq!(clamped.workers, 1);
+    }
+
+    #[test]
+    fn workers_clamp_keeps_the_rate_bounded() {
+        assert_eq!(clamp_workers(0), 1);
+        assert_eq!(clamp_workers(1), 1);
+        assert_eq!(clamp_workers(3), 3);
+        assert_eq!(clamp_workers(4), 4);
+        assert_eq!(clamp_workers(5), 4);
+        assert_eq!(clamp_workers(64), MAX_WORKERS);
+        // Even at the cap, a polite interval stays in the double-digit
+        // req/min range — an order of magnitude below the ~2 req/s that
+        // research-13 saw draw 429s.
+        assert!(MAX_WORKERS as f64 * 60.0 / 3.5 < 120.0);
         assert!(parse_argv(&["--from".into()]).is_err());
     }
 }
