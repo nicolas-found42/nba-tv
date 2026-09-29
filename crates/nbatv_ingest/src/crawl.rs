@@ -35,7 +35,8 @@
 //! days. The driver runs one season at a time; wave slicing is the caller's
 //! job (`--from`/`--to` on the `nbatv-crawl` bin).
 
-use std::collections::BTreeSet;
+use nbatv_catalog::{CrawlFailureChoice, JevJudge};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -247,6 +248,14 @@ fn kind(file_name: &str) -> Kind {
     }
 }
 
+/// One decisive optional classification for an ambiguous HTTP response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassifiedCrawlFailure {
+    pub file_name: String,
+    pub url: String,
+    pub choice: CrawlFailureChoice,
+}
+
 /// Outcome of [`crawl_season`] for one season.
 #[derive(Debug, Clone, Default)]
 pub struct SeasonCrawl {
@@ -264,6 +273,8 @@ pub struct SeasonCrawl {
     pub revisions: Vec<PageRevision>,
     /// Why the season was given up, if it was.
     pub error: Option<String>,
+    /// Latest decisive optional classification, for reporting/manual review.
+    pub classified_failure: Option<ClassifiedCrawlFailure>,
 }
 
 impl SeasonCrawl {
@@ -341,13 +352,38 @@ where
     C: FetchClient,
     S: FnMut(Duration),
 {
+    crawl_season_with_jev(
+        client, source, ending, out_dir, monthly, interval, None, sleep,
+    )
+}
+
+/// Crawl one season with an optional typed classifier for ambiguous HTTP
+/// responses. Exact 404/410 and 429/503 handling preempts Jev; transport
+/// failures never call it. Decisions are cached per file for the run.
+pub fn crawl_season_with_jev<C, S>(
+    client: &C,
+    source: &str,
+    ending: i32,
+    out_dir: &Path,
+    monthly: bool,
+    interval: Duration,
+    judge: Option<&dyn JevJudge>,
+    sleep: &mut S,
+) -> SeasonCrawl
+where
+    C: FetchClient,
+    S: FnMut(Duration),
+{
     let mut out = SeasonCrawl::new(ending);
     let dir = season_dir(out_dir, source, &out.slug);
     let mut dead: BTreeSet<String> = BTreeSet::new();
+    let mut classification_cache: BTreeMap<String, Option<CrawlFailureChoice>> = BTreeMap::new();
     // Content equality, not length: landing a split both drains fetched
     // jobs and adds newly derived boxes in the same re-derivation.
     let mut last_pending: Option<Vec<FetchJob>> = None;
     let mut stalls = 0usize;
+    let mut throttle_wait = Duration::from_secs(30);
+    let mut throttles = 0usize;
 
     loop {
         let jobs = match pending_jobs(&dir, ending, monthly, &dead) {
@@ -360,21 +396,6 @@ where
         if jobs.is_empty() {
             break;
         }
-        if last_pending.as_deref() == Some(&jobs) {
-            stalls += 1;
-            if stalls >= 2 {
-                out.error = Some(format!(
-                    "no progress across {} attempts; {} request(s) keep failing",
-                    stalls + 1,
-                    jobs.len()
-                ));
-                break;
-            }
-        } else {
-            stalls = 0;
-            last_pending = Some(jobs.clone());
-        }
-
         match fetch_season_with_sleeper_at(
             client, source, &out.slug, &jobs, out_dir, interval, sleep,
         ) {
@@ -382,6 +403,9 @@ where
                 // No break here: this attempt may have landed the schedule
                 // or splits that make further derivations possible.
                 out.absorb(report);
+                stalls = 0;
+                throttles = 0;
+                throttle_wait = Duration::from_secs(30);
             }
             Err(e) => {
                 // Everything before the failing job landed, so the failing
@@ -406,17 +430,95 @@ where
                     revisions: Vec::new(),
                 };
                 out.absorb(landed);
-                if matches!(e, FetchError::NotFound(_)) {
-                    dead.insert(job.file_name.clone());
-                    out.dead.push(job.file_name.clone());
-                    if job.file_name == "_games.html" {
-                        out.error = Some(format!("schedule page not found: {}", job.url));
+
+                let decision = match &e {
+                    FetchError::NotFound(_) => Some(CrawlFailureChoice::NotFound),
+                    FetchError::Throttled(_) => Some(CrawlFailureChoice::RateLimited),
+                    FetchError::Unclassified { status, evidence } => {
+                        let decision =
+                            if let Some(cached) = classification_cache.get(&job.file_name) {
+                                *cached
+                            } else {
+                                let status = status
+                                    .map(|status| status.to_string())
+                                    .unwrap_or_else(|| "unknown".to_owned());
+                                let response = format!("HTTP status: {status}\n\n{evidence}");
+                                let decision = judge
+                                    .and_then(|judge| {
+                                        judge.classify_crawl_failure(&response).ok().flatten()
+                                    })
+                                    .filter(|choice| *choice != CrawlFailureChoice::Unknown);
+                                if let Some(choice) = decision {
+                                    out.classified_failure = Some(ClassifiedCrawlFailure {
+                                        file_name: job.file_name.clone(),
+                                        url: job.url.clone(),
+                                        choice,
+                                    });
+                                }
+                                classification_cache.insert(job.file_name.clone(), decision);
+                                decision
+                            };
+                        decision
+                    }
+                    FetchError::UnsafePath(_)
+                    | FetchError::Io(_)
+                    | FetchError::Client(_)
+                    | FetchError::Decode(_) => None,
+                };
+
+                match decision {
+                    Some(CrawlFailureChoice::NotFound) => {
+                        dead.insert(job.file_name.clone());
+                        out.dead.push(job.file_name.clone());
+                        stalls = 0;
+                        if job.file_name == "_games.html" {
+                            out.error = Some(format!("schedule page not found: {}", job.url));
+                            break;
+                        }
+                    }
+                    Some(CrawlFailureChoice::RateLimited) => {
+                        // Rate budget exhausted: wait it out with a growing
+                        // backoff. This never counts as a stall; eight straight
+                        // throttled re-derivations give the season up.
+                        stalls = 0;
+                        sleep(throttle_wait);
+                        throttle_wait = (throttle_wait * 2).min(Duration::from_secs(300));
+                        throttles += 1;
+                        if throttles >= 8 {
+                            out.error = Some(format!(
+                                "still throttled after {throttles} backoffs (last wait {throttle_wait:?}): {e}"
+                            ));
+                            break;
+                        }
+                    }
+                    Some(CrawlFailureChoice::AccessBlocked | CrawlFailureChoice::ParserChange) => {
+                        out.error = Some(format!(
+                            "{} needs manual review after {:?}: {e}",
+                            job.file_name,
+                            decision.expect("terminal classification")
+                        ));
                         break;
                     }
-                } else {
-                    // Transient-looking failure: pause once before the
-                    // polite retry; the stall bound ends persistent ones.
-                    sleep(interval);
+                    Some(CrawlFailureChoice::TransientServer | CrawlFailureChoice::Unknown)
+                    | None => {
+                        if last_pending.as_deref() == Some(&jobs) {
+                            stalls += 1;
+                            if stalls >= 2 {
+                                out.error = Some(format!(
+                                    "no progress across {} attempts; {} request(s) keep failing",
+                                    stalls + 2,
+                                    jobs.len()
+                                ));
+                                break;
+                            }
+                        } else {
+                            stalls = 1;
+                        }
+                        last_pending = Some(jobs.clone());
+                        // Transient-looking failure: pause once before the
+                        // polite retry; the stall bound ends persistent ones.
+                        sleep(interval);
+                    }
                 }
             }
         }
@@ -432,6 +534,11 @@ where
 mod tests {
     use super::*;
     use crate::{season_slug_to_ending_year, write_snapshot_gz, FETCH_MIN_INTERVAL};
+    use nbatv_catalog::{
+        CollectorNoteInput, CrawlFailureChoice, FileSelection, FileSelectionInput, GameTypeChoice,
+        JevError, JevJudge, SearchTemplateSelection, TeamChoice,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn season_slug_matches_the_ingest_reader_through_the_century_rollover() {
@@ -627,6 +734,8 @@ mod tests {
         pages: std::collections::HashMap<String, String>,
         not_found: BTreeSet<String>,
         fail_all: bool,
+        throttle_all: bool,
+        unclassified: Option<(u16, String)>,
         calls: std::cell::RefCell<Vec<String>>,
     }
 
@@ -639,6 +748,8 @@ mod tests {
                     .collect(),
                 not_found: BTreeSet::new(),
                 fail_all: false,
+                throttle_all: false,
+                unclassified: None,
                 calls: std::cell::RefCell::new(Vec::new()),
             }
         }
@@ -650,13 +761,82 @@ mod tests {
             if self.fail_all {
                 return Err(FetchError::Client("network down".to_owned()));
             }
+            if self.throttle_all {
+                return Err(FetchError::Throttled("HTTP 429 for you".to_owned()));
+            }
             if self.not_found.contains(url) {
                 return Err(FetchError::NotFound(url.to_owned()));
+            }
+            if let Some((status, evidence)) = &self.unclassified {
+                return Err(FetchError::Unclassified {
+                    status: Some(*status),
+                    evidence: evidence.clone(),
+                });
             }
             self.pages
                 .get(url)
                 .cloned()
                 .ok_or_else(|| FetchError::Client(format!("no fixture for {url}")))
+        }
+    }
+
+    struct CrawlJudge {
+        choice: CrawlFailureChoice,
+        calls: AtomicUsize,
+    }
+
+    impl JevJudge for CrawlJudge {
+        fn select_file(&self, _: &FileSelectionInput) -> Result<Option<FileSelection>, JevError> {
+            Ok(None)
+        }
+
+        fn match_candidate(
+            &self,
+            _: &nbatv_catalog::GameContext,
+            _: &nbatv_catalog::ProbeCandidate,
+        ) -> Result<Option<nbatv_catalog::CandidateVerdict>, JevError> {
+            Ok(None)
+        }
+
+        fn classify_game_type(&self, _: &GameTypeChoice) -> Result<Option<String>, JevError> {
+            Ok(None)
+        }
+
+        fn align_team(&self, _: &TeamChoice) -> Result<Option<String>, JevError> {
+            Ok(None)
+        }
+
+        fn match_collector_note(&self, _: &CollectorNoteInput) -> Result<Option<String>, JevError> {
+            Ok(None)
+        }
+
+        fn choose_search_template(
+            &self,
+            _: &nbatv_catalog::GameContext,
+            _: &str,
+        ) -> Result<Option<SearchTemplateSelection>, JevError> {
+            Ok(None)
+        }
+
+        fn classify_crawl_failure(&self, _: &str) -> Result<Option<CrawlFailureChoice>, JevError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(self.choice))
+        }
+
+        fn classify_html_row(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<nbatv_catalog::HtmlRowChoice>, JevError> {
+            Ok(None)
+        }
+
+        fn route_shell_command(&self, _: &str) -> Result<Option<String>, JevError> {
+            Ok(None)
+        }
+
+        fn prioritize_review(&self, _: &[String], _: &str) -> Result<Option<u8>, JevError> {
+            Ok(None)
         }
     }
 
@@ -895,10 +1075,138 @@ mod tests {
             &mut |_| pauses += 1,
         );
         assert!(out.error.is_some());
-        // Attempts: two failing fetches, then the stall check fires before
-        // the third — each failed attempt pauses politely before its retry.
+        // Attempts: two failing fetches; one polite pause before the retry,
+        // none before the give-up.
         assert_eq!(fail.calls.borrow().len(), 2);
-        assert_eq!(pauses, 2);
+        assert_eq!(pauses, 1);
         assert!(!dir.season().join("_games.html").exists());
+    }
+
+    #[test]
+    fn crawl_backs_off_exponentially_while_throttled_then_gives_up() {
+        let dir = TempDir::fresh("throttle");
+        let mut throttled = FakeClient::with(&[]);
+        throttled.throttle_all = true;
+
+        let mut waits: Vec<Duration> = Vec::new();
+        let out = crawl_season(
+            &throttled,
+            "br",
+            1947,
+            &dir.path,
+            true,
+            FETCH_MIN_INTERVAL,
+            &mut |d| waits.push(d),
+        );
+        // Eight backoffs (30s doubling to the 300s cap), then the season
+        // fails with the throttle named — throttling never counts as stall
+        // and never trips the fast-fail path.
+        assert_eq!(
+            out.error.as_deref(),
+            Some("still throttled after 8 backoffs (last wait 300s): throttled: HTTP 429 for you")
+        );
+        assert_eq!(waits.len(), 8);
+        assert_eq!(
+            waits,
+            [
+                Duration::from_secs(30),
+                Duration::from_secs(60),
+                Duration::from_secs(120),
+                Duration::from_secs(240),
+                Duration::from_secs(300),
+                Duration::from_secs(300),
+                Duration::from_secs(300),
+                Duration::from_secs(300),
+            ]
+        );
+    }
+
+    #[test]
+    fn access_block_is_terminal_manual_review_not_dead_pool() {
+        let dir = TempDir::fresh("jev-access");
+        let mut client = FakeClient::with(&[]);
+        client.unclassified = Some((403, "Access denied by source".to_owned()));
+        let judge = CrawlJudge {
+            choice: CrawlFailureChoice::AccessBlocked,
+            calls: AtomicUsize::new(0),
+        };
+
+        let out = crawl_season_with_jev(
+            &client,
+            "br",
+            1947,
+            &dir.path,
+            true,
+            FETCH_MIN_INTERVAL,
+            Some(&judge),
+            &mut |_| {},
+        );
+
+        assert!(out.dead.is_empty());
+        assert!(out
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("manual review")));
+        let classified = out.classified_failure.expect("typed classification");
+        assert_eq!(classified.file_name, "_games.html");
+        assert_eq!(classified.choice, CrawlFailureChoice::AccessBlocked);
+        assert_eq!(judge.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(client.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn crawl_failure_classification_is_cached_across_retries() {
+        let dir = TempDir::fresh("jev-cache");
+        let mut client = FakeClient::with(&[]);
+        client.unclassified = Some((502, "upstream unavailable".to_owned()));
+        let judge = CrawlJudge {
+            choice: CrawlFailureChoice::TransientServer,
+            calls: AtomicUsize::new(0),
+        };
+
+        let out = crawl_season_with_jev(
+            &client,
+            "br",
+            1947,
+            &dir.path,
+            true,
+            FETCH_MIN_INTERVAL,
+            Some(&judge),
+            &mut |_| {},
+        );
+
+        assert!(out.error.is_some());
+        assert_eq!(client.calls.borrow().len(), 2);
+        assert_eq!(judge.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            out.classified_failure.map(|failure| failure.choice),
+            Some(CrawlFailureChoice::TransientServer)
+        );
+    }
+
+    #[test]
+    fn transport_failure_without_response_never_calls_jev() {
+        let dir = TempDir::fresh("jev-transport");
+        let mut client = FakeClient::with(&[]);
+        client.fail_all = true;
+        let judge = CrawlJudge {
+            choice: CrawlFailureChoice::AccessBlocked,
+            calls: AtomicUsize::new(0),
+        };
+
+        let out = crawl_season_with_jev(
+            &client,
+            "br",
+            1947,
+            &dir.path,
+            true,
+            FETCH_MIN_INTERVAL,
+            Some(&judge),
+            &mut |_| {},
+        );
+
+        assert!(out.error.is_some());
+        assert_eq!(judge.calls.load(Ordering::SeqCst), 0);
+        assert!(out.classified_failure.is_none());
     }
 }

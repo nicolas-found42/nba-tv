@@ -66,6 +66,9 @@
 //! through [`IaProbe`] resolved Playable at rank 1, confidence 1.0, with a
 //! genuine `archive.org/download/…` URL.
 //!
+use crate::jev::{
+    select_ia_file, DirectHttpJev, DisabledJevJudge, FileSelectionInput, JevError, JevJudge,
+};
 use crate::politeness::PolitenessConfig;
 use crate::probe::{GameContext, ProbeCandidate, ProbeOutcome, SourceProbe};
 use nbatv_ladder::YoutubeQuota;
@@ -163,6 +166,7 @@ impl IaHttp for CurlHttp {
 pub struct IaProbe {
     http: Box<dyn IaHttp>,
     sleep: Box<dyn Fn(Duration) + Send + Sync>,
+    judge: Box<dyn JevJudge>,
 }
 
 impl IaProbe {
@@ -171,6 +175,7 @@ impl IaProbe {
         Self {
             http: Box::new(CurlHttp::new()),
             sleep: Box::new(std::thread::sleep),
+            judge: Box::new(DisabledJevJudge),
         }
     }
 
@@ -180,6 +185,7 @@ impl IaProbe {
         Self {
             http,
             sleep: Box::new(std::thread::sleep),
+            judge: Box::new(DisabledJevJudge),
         }
     }
 
@@ -189,7 +195,31 @@ impl IaProbe {
         http: Box<dyn IaHttp>,
         sleep: Box<dyn Fn(Duration) + Send + Sync>,
     ) -> Self {
-        Self { http, sleep }
+        Self {
+            http,
+            sleep,
+            judge: Box::new(DisabledJevJudge),
+        }
+    }
+
+    /// Attach the optional semantic sidecar. The default disabled judge
+    /// keeps existing catalog behavior unchanged.
+    pub fn with_judge(mut self, judge: Box<dyn JevJudge>) -> Self {
+        self.judge = judge;
+        self
+    }
+
+    /// The Jev sidecar is intentionally optional. A blank/malformed
+    /// environment setup falls back to the existing deterministic policy.
+    pub fn live_with_env_jev() -> Self {
+        match DirectHttpJev::from_env() {
+            Ok(judge) => Self::live().with_judge(Box::new(judge)),
+            Err(JevError::MissingApiKey) => Self::live(),
+            Err(error) => {
+                eprintln!("nbatv-catalog: Jev disabled: {error}");
+                Self::live()
+            }
+        }
     }
 
     /// Note-15 verbatim inventory query (identifier wildcards, movies only).
@@ -261,14 +291,36 @@ impl SourceProbe for IaProbe {
                 Err(_) => continue,
             };
             fetched.push(doc.identifier.clone());
-            if let Some((file, duration_secs)) = pick_video_file(&item.files) {
-                candidates.push(ProbeCandidate {
-                    url_or_pointer: download_url(&item.identifier, &file.name),
-                    title: item.title,
-                    description: describe(&item.description, &file.name),
-                    duration_secs,
-                });
+            let original_files = video_files(&item.files);
+            if original_files.is_empty() {
+                continue;
             }
+            let selection = match select_ia_file(
+                self.judge.as_ref(),
+                &FileSelectionInput {
+                    target: game.clone(),
+                    item_title: item.title.clone(),
+                    files: original_files
+                        .iter()
+                        .map(|file| (file.name.clone(), file.length_secs))
+                        .collect(),
+                },
+            ) {
+                Ok(selection) => selection,
+                Err(_) => None,
+            };
+            let Some((file_name, duration_secs)) = selection else {
+                continue;
+            };
+            let Some(file) = original_files.iter().find(|file| file.name == file_name) else {
+                continue;
+            };
+            candidates.push(ProbeCandidate {
+                url_or_pointer: download_url(&item.identifier, &file.name),
+                title: item.title,
+                description: describe(&item.description, &file.name),
+                duration_secs,
+            });
         }
         if fetched.is_empty() && had_docs {
             return ProbeOutcome::deferred(queries.join("\n"));
@@ -383,35 +435,30 @@ fn prefer_year(docs: Vec<SearchDoc>, year4: &str, year2: &str) -> Vec<SearchDoc>
     }
 }
 
-/// Longest original video file: skips derivatives (thumbnails, `_files.xml`,
-/// sqlite sidecars) by source marker, playable tape by extension. First
-/// wins ties, so single-file items are order-independent.
-fn pick_video_file(files: &[MetadataFile]) -> Option<(&MetadataFile, Option<u64>)> {
+/// All original video files, deterministic input order. Jev may choose one
+/// by exact filename; when unavailable, the policy picks the longest one.
+fn video_files(files: &[MetadataFile]) -> Vec<&MetadataFile> {
     const VIDEO_EXTS: [&str; 9] = [
         ".mp4", ".mkv", ".avi", ".ogv", ".webm", ".mov", ".m4v", ".mpg", ".mpeg",
     ];
-    let mut best: Option<(&MetadataFile, u64, bool)> = None;
-    for file in files {
-        if file.source.to_lowercase() == "derivative" {
-            continue;
-        }
-        let lower = file.name.to_lowercase();
-        if !VIDEO_EXTS.iter().any(|ext| lower.ends_with(ext)) {
-            continue;
-        }
-        let length = file.length_secs.unwrap_or(0);
-        let has_length = file.length_secs.is_some();
-        let wins = match &best {
-            None => true,
-            Some((_, best_length, best_has)) => {
-                (has_length && !best_has) || (has_length == *best_has && length > *best_length)
-            }
-        };
-        if wins {
-            best = Some((file, length, has_length));
-        }
-    }
-    best.map(|(file, _, _)| (file, file.length_secs))
+    files
+        .iter()
+        .filter(|file| file.source.to_lowercase() != "derivative")
+        .filter(|file| {
+            let lower = file.name.to_lowercase();
+            VIDEO_EXTS.iter().any(|ext| lower.ends_with(ext))
+        })
+        .collect()
+}
+
+/// Longest original video file: the deterministic fallback used by the
+/// offline parser and by callers that do not install a semantic sidecar.
+#[cfg(test)]
+fn pick_video_file(files: &[MetadataFile]) -> Option<(&MetadataFile, Option<u64>)> {
+    video_files(files)
+        .into_iter()
+        .max_by_key(|file| file.length_secs.unwrap_or(0))
+        .map(|file| (file, file.length_secs))
 }
 
 /// Form-encode a query value (`+` for spaces, as in note 15's pasted URL).

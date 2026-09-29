@@ -7,8 +7,10 @@
 //! smoke run.
 
 use nbatv_catalog::{
-    registry_with_ytdlp, sweep_game, GameContext, PolitenessConfig, ProbeRegistry, SourceProbe,
-    YtdlpProbe,
+    registry_with_ytdlp, sweep_game, CandidateVerdict, CollectorNoteInput, CrawlFailureChoice,
+    FileSelection, FileSelectionInput, GameContext, GameTypeChoice, HtmlRowChoice, JevError,
+    JevJudge, PolitenessConfig, ProbeCandidate, ProbeRegistry, SearchTemplate,
+    SearchTemplateSelection, SourceProbe, TeamChoice, YtdlpProbe,
 };
 use nbatv_db::{create_schema, game_queries_for, insert_game, tape_sources_for, GameRow};
 use nbatv_ladder::YoutubeQuota;
@@ -16,7 +18,10 @@ use rusqlite::Connection;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 const GAME_ID: &str = "194611010TRH";
@@ -104,6 +109,71 @@ fn argv_of(log: &Path) -> Vec<String> {
         .collect()
 }
 
+#[derive(Clone)]
+struct TemplateJudge {
+    template: SearchTemplate,
+    confidence: f64,
+    fail: bool,
+    calls: Arc<AtomicUsize>,
+}
+
+impl JevJudge for TemplateJudge {
+    fn select_file(&self, _: &FileSelectionInput) -> Result<Option<FileSelection>, JevError> {
+        Ok(None)
+    }
+
+    fn match_candidate(
+        &self,
+        _: &GameContext,
+        _: &ProbeCandidate,
+    ) -> Result<Option<CandidateVerdict>, JevError> {
+        Ok(None)
+    }
+
+    fn classify_game_type(&self, _: &GameTypeChoice) -> Result<Option<String>, JevError> {
+        Ok(None)
+    }
+
+    fn align_team(&self, _: &TeamChoice) -> Result<Option<String>, JevError> {
+        Ok(None)
+    }
+
+    fn match_collector_note(&self, _: &CollectorNoteInput) -> Result<Option<String>, JevError> {
+        Ok(None)
+    }
+
+    fn choose_search_template(
+        &self,
+        _: &GameContext,
+        _: &str,
+    ) -> Result<Option<SearchTemplateSelection>, JevError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail {
+            return Err(JevError::Transport("template test failure".to_owned()));
+        }
+        Ok(Some(SearchTemplateSelection {
+            template: self.template,
+            confidence: self.confidence,
+        }))
+    }
+
+    fn classify_crawl_failure(&self, _: &str) -> Result<Option<CrawlFailureChoice>, JevError> {
+        Ok(None)
+    }
+
+    fn classify_html_row(&self, _: &str, _: &str) -> Result<Option<HtmlRowChoice>, JevError> {
+        Ok(None)
+    }
+
+    fn route_shell_command(&self, _: &str) -> Result<Option<String>, JevError> {
+        Ok(None)
+    }
+
+    fn prioritize_review(&self, _: &[String], _: &str) -> Result<Option<u8>, JevError> {
+        Ok(None)
+    }
+}
+
 #[test]
 fn search_pattern_uses_teams_and_date() {
     assert_eq!(
@@ -114,6 +184,61 @@ fn search_pattern_uses_teams_and_date() {
         YtdlpProbe::search_query(&ctx()),
         "ytsearch10:NYK vs TRH Full Game 1946-11-01"
     );
+}
+
+#[test]
+fn decisive_template_overrides_only_the_closed_query_pattern() {
+    let (bin, log, _guard) = install_fake(":");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let probe = YtdlpProbe::with_binary(bin).with_judge(Box::new(TemplateJudge {
+        template: SearchTemplate::TeamArchive,
+        confidence: 0.9,
+        fail: false,
+        calls: calls.clone(),
+    }));
+    let mut quota = YoutubeQuota::new();
+
+    let out = probe.probe(&ctx(), &PolitenessConfig::default(), &mut quota);
+
+    assert!(!out.deferred);
+    assert_eq!(
+        out.query_text,
+        "ytsearch10:NYK vs TRH Complete Game Archive 1946-11-01"
+    );
+    assert_eq!(quota.used(), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(argv_of(&log).last().unwrap(), &out.query_text);
+}
+
+#[test]
+fn uncertain_or_failed_template_keeps_the_deterministic_query() {
+    let (bin, log, _guard) = install_fake(":");
+    let low_calls = Arc::new(AtomicUsize::new(0));
+    let low = YtdlpProbe::with_binary(&bin).with_judge(Box::new(TemplateJudge {
+        template: SearchTemplate::TeamArchive,
+        confidence: 0.74,
+        fail: false,
+        calls: low_calls.clone(),
+    }));
+    let failed_calls = Arc::new(AtomicUsize::new(0));
+    let failed = YtdlpProbe::with_binary(&bin).with_judge(Box::new(TemplateJudge {
+        template: SearchTemplate::TeamArchive,
+        confidence: 0.9,
+        fail: true,
+        calls: failed_calls.clone(),
+    }));
+    let mut quota = YoutubeQuota::new();
+
+    let low_out = low.probe(&ctx(), &PolitenessConfig::default(), &mut quota);
+    let failed_out = failed.probe(&ctx(), &PolitenessConfig::default(), &mut quota);
+
+    let fallback = "ytsearch10:NYK vs TRH Full Game 1946-11-01";
+    assert_eq!(low_out.query_text, fallback);
+    assert_eq!(failed_out.query_text, fallback);
+    assert_eq!(low_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(failed_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(quota.used(), 2);
+    assert_eq!(argv_of(&log).last().unwrap(), fallback);
 }
 
 #[test]

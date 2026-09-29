@@ -20,8 +20,9 @@
 //!   the verdict live from `game_queries` + `tape_sources`, so restarts
 //!   cannot disagree with the evidence.
 
+use crate::jev::{CandidateVerdict, DisabledJevJudge, JevJudge};
 use crate::politeness::PolitenessConfig;
-use crate::probe::{GameContext, ProbeRegistry};
+use crate::probe::{GameContext, ProbeCandidate, ProbeRegistry};
 use crate::scorer::{confidence_for, level_to_str, parse_level, score_candidate};
 use nbatv_db::{GameQuery, TapeSource};
 use nbatv_ladder::exhaustion::{
@@ -106,6 +107,81 @@ pub fn rung_name(rung: u8) -> String {
         .unwrap_or_else(|| format!("rung-{rung}"))
 }
 
+/// One candidate after deterministic scoring and optional Jev reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateRank {
+    /// Original source order, retained as the final deterministic tiebreak.
+    pub index: usize,
+    pub level: MatchLevel,
+    /// Bounded evidence quality: 0 (weakest) through 3 (strongest).
+    pub quality: u8,
+}
+
+/// Reconcile one deterministic verdict with the optional Jev sidecar.
+///
+/// Jev can only demote a positive deterministic match to REVIEW after an
+/// explicit contradiction. It never promotes a candidate, and an already
+/// rejected candidate stays rejected.
+pub fn reconcile_candidate_level(
+    deterministic: MatchLevel,
+    verdict: Option<&CandidateVerdict>,
+) -> MatchLevel {
+    let Some(verdict) = verdict.filter(|verdict| verdict.decisive) else {
+        return deterministic;
+    };
+    if verdict.same_game == Some(false) && deterministic > MatchLevel::Reject {
+        MatchLevel::Review
+    } else {
+        deterministic
+    }
+}
+
+/// Rank candidates without ever granting the model promotion authority.
+///
+/// Every candidate is scored deterministically first. Jev errors and
+/// uncertain answers leave that verdict intact; a decisive contradiction
+/// demotes a positive match to REVIEW. Ordering is level, bounded quality,
+/// then original source index.
+pub fn rank_candidates(
+    game: &GameContext,
+    candidates: &[ProbeCandidate],
+    judge: &dyn JevJudge,
+) -> Vec<CandidateRank> {
+    let mut ranked: Vec<CandidateRank> = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let deterministic = score_candidate(game, candidate);
+            let verdict = judge.match_candidate(game, candidate).ok().flatten();
+            let level = reconcile_candidate_level(deterministic, verdict.as_ref());
+            let quality = verdict
+                .filter(|verdict| verdict.decisive)
+                .and_then(|verdict| verdict.quality)
+                .filter(|quality| quality.is_finite())
+                .map(|quality| quality.clamp(0.0, 3.0).round() as u8)
+                .unwrap_or(match deterministic {
+                    MatchLevel::Confirmed => 3,
+                    MatchLevel::Likely => 2,
+                    MatchLevel::Review => 1,
+                    MatchLevel::Reject => 0,
+                });
+            CandidateRank {
+                index,
+                level,
+                quality,
+            }
+        })
+        .collect();
+    ranked.sort_by(|left, right| {
+        right
+            .level
+            .cmp(&left.level)
+            .then_with(|| right.quality.cmp(&left.quality))
+            .then_with(|| left.index.cmp(&right.index))
+    });
+    ranked
+}
+
 /// Sweep one game through rungs 0–4 in ladder order.
 ///
 /// Consults `game_queries` to skip rungs swept inside the rescan window,
@@ -125,6 +201,29 @@ pub fn sweep_game(
     politeness: &PolitenessConfig,
     quota: &mut YoutubeQuota,
     now: &str,
+) -> Result<SweepReport, SweepError> {
+    sweep_game_with_judge(
+        conn,
+        game,
+        probes,
+        politeness,
+        quota,
+        now,
+        &DisabledJevJudge,
+    )
+}
+
+/// Sweep one game with deterministic candidate scoring plus an optional Jev
+/// reconciliation sidecar. Per-candidate Jev failures fall back to the
+/// deterministic verdict and never fail the sweep.
+pub fn sweep_game_with_judge(
+    conn: &Connection,
+    game: &GameContext,
+    probes: &ProbeRegistry<'_>,
+    politeness: &PolitenessConfig,
+    quota: &mut YoutubeQuota,
+    now: &str,
+    judge: &dyn JevJudge,
 ) -> Result<SweepReport, SweepError> {
     let now_days = parse_date(now).ok_or_else(|| SweepError::BadNow(now.to_owned()))?;
     let stored: std::collections::HashMap<u8, GameQuery> =
@@ -166,22 +265,22 @@ pub fn sweep_game(
             continue;
         }
         probed.push(rung);
-        let best = outcome
-            .candidates
-            .iter()
-            .map(|c| score_candidate(game, c))
-            .max()
+        let ranking = rank_candidates(game, &outcome.candidates, judge);
+        let best = ranking
+            .first()
+            .map(|candidate| candidate.level)
             .unwrap_or(MatchLevel::Reject);
-        let (review_url, review_title) = if best == MatchLevel::Review {
-            outcome
-                .candidates
-                .iter()
-                .find(|c| score_candidate(game, c) == MatchLevel::Review)
-                .map(|c| (Some(c.url_or_pointer.clone()), Some(c.title.clone())))
-                .unwrap_or((None, None))
-        } else {
-            (None, None)
-        };
+        let (review_url, review_title) = ranking
+            .iter()
+            .find(|candidate| candidate.level == MatchLevel::Review)
+            .map(|candidate| {
+                let candidate = &outcome.candidates[candidate.index];
+                (
+                    Some(candidate.url_or_pointer.clone()),
+                    Some(candidate.title.clone()),
+                )
+            })
+            .unwrap_or((None, None));
         let row = GameQuery {
             game_id: game.game_id.clone(),
             rung,
@@ -194,10 +293,9 @@ pub fn sweep_game(
         nbatv_db::upsert_game_query(conn, &row)?;
         evals.push(stored_eval(&game.game_id, &row, best));
         if best >= MatchLevel::Likely {
-            let winner = outcome
-                .candidates
-                .iter()
-                .find(|c| score_candidate(game, c) == best)
+            let winner = ranking
+                .first()
+                .map(|candidate| &outcome.candidates[candidate.index])
                 .expect("best verdict came from these candidates");
             nbatv_db::upsert_tape_source(
                 conn,
@@ -211,6 +309,8 @@ pub fn sweep_game(
                 },
             )?;
             break;
+        } else {
+            nbatv_db::invalidate_tape_source(conn, &game.game_id, rung)?;
         }
     }
     // Rungs never reached (early win) count as unconsumed — the win itself
@@ -280,6 +380,74 @@ pub fn review_list_all(conn: &Connection) -> SqlResult<Vec<ReviewItem>> {
         .filter(|row| parse_level(&row.best_match_level) == Some(MatchLevel::Review))
         .map(review_item)
         .collect())
+}
+
+/// Maximum REVIEW items sent to the optional sidecar in one prioritization
+/// pass. Later items retain their deterministic order without unbounded calls.
+const MAX_REVIEW_PRIORITY_ITEMS: usize = 10;
+const REVIEW_EVIDENCE_CHARS: usize = 512;
+
+/// REVIEW candidates for one game, optionally prioritized in memory.
+pub fn review_list_with_judge(
+    conn: &Connection,
+    game_id: &str,
+    judge: &dyn JevJudge,
+    query: &str,
+) -> SqlResult<Vec<ReviewItem>> {
+    Ok(prioritize_reviews(
+        review_list(conn, game_id)?,
+        judge,
+        query,
+    ))
+}
+
+/// REVIEW candidates across all games, optionally prioritized in memory.
+pub fn review_list_all_with_judge(
+    conn: &Connection,
+    judge: &dyn JevJudge,
+    query: &str,
+) -> SqlResult<Vec<ReviewItem>> {
+    Ok(prioritize_reviews(review_list_all(conn)?, judge, query))
+}
+
+/// Prioritize an already-loaded REVIEW list without mutating persistence.
+/// Disabled, uncertain, failed, invalid, and unscored items all retain their
+/// original relative order.
+pub fn prioritize_reviews(
+    items: Vec<ReviewItem>,
+    judge: &dyn JevJudge,
+    query: &str,
+) -> Vec<ReviewItem> {
+    let mut ranked: Vec<(usize, u8, ReviewItem)> = items
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let score = if index < MAX_REVIEW_PRIORITY_ITEMS {
+                let evidence = review_evidence(&item);
+                judge
+                    .prioritize_review(&[evidence], query)
+                    .ok()
+                    .flatten()
+                    .filter(|score| *score <= 3)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            (index, score, item)
+        })
+        .collect();
+    ranked.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    ranked.into_iter().map(|(_, _, item)| item).collect()
+}
+
+fn review_evidence(item: &ReviewItem) -> String {
+    format!(
+        "{} | {} | {} | {} | {}",
+        item.game_id, item.rung_name, item.title, item.query_text, item.url_or_pointer
+    )
+    .chars()
+    .take(REVIEW_EVIDENCE_CHARS)
+    .collect()
 }
 
 fn status_from(

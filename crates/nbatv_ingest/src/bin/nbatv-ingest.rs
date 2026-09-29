@@ -10,16 +10,20 @@
 //! cargo run -q -p nbatv_ingest --bin nbatv-ingest -- --raw data/raw/br --db data/archive.db
 //! ```
 //!
-//! Exit codes: 0 ingested, 2 bad usage, 1 run failure. Politeness is the
-//! crawler's job (see `fetch_season` etiquette): this binary only reads
-//! files already on disk and writes the one db file.
+//! crawler's job (see `fetch_season` etiquette): this binary reads files
+//! already on disk and writes the one db file. If Jev environment variables
+//! are configured, its optional review runs only after that write commits.
 //!
 //! Honesty notes (mirrored on [`nbatv_ingest::ingest_snapshot_dir`]):
 //! every `game_type` is `REGULAR` (the snapshots carry no round marker),
 //! `ot`/`arena`/`attendance` are NULL, and games without a box snapshot
 //! stay as bare 0-0 schedule rows until a later crawl upgrades them.
+//!
+//! The sidecar is advisory: it cannot rewrite Game identity, Team slugs, or
+//! any persisted value.
 
-use nbatv_ingest::ingest_snapshot_dir;
+use nbatv_catalog::{DirectHttpJev, JevJudge};
+use nbatv_ingest::{ingest_snapshot_dir_with_jev, JevIngestReview};
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -79,16 +83,28 @@ fn run(args: &Args) -> Result<(), String> {
     }
     let conn = Connection::open(&args.db)
         .map_err(|e| format!("cannot open archive db {:?}: {e}", args.db))?;
-    let report =
-        ingest_snapshot_dir(&conn, &args.raw).map_err(|e| format!("ingest failed: {e}"))?;
+    let judge = match DirectHttpJev::from_env() {
+        Ok(judge) => Some(judge),
+        Err(e) => {
+            eprintln!("Jev disabled; deterministic ingest will continue: {e}");
+            None
+        }
+    };
+    let (report, review) = ingest_snapshot_dir_with_jev(
+        &conn,
+        &args.raw,
+        judge.as_ref().map(|judge| judge as &dyn JevJudge),
+    )
+    .map_err(|e| format!("ingest failed: {e}"))?;
     println!(
-        "seasons={} teams={} games={} (with_box={} without_box={} mismatched={})",
+        "seasons={} teams={} games={} (with_box={} without_box={} mismatched={} regular_fallback={})",
         report.seasons,
         report.teams,
         report.games,
         report.games_with_box,
         report.games_without_box,
-        report.games_mismatched
+        report.games_mismatched,
+        report.regular_fallback_games
     );
     println!(
         "writes: box_teams={} box_players={} season_totals={} upgraded_games={}",
@@ -107,7 +123,37 @@ fn run(args: &Args) -> Result<(), String> {
             report.unknown_team_slugs.join(", ")
         );
     }
+    print_jev_review(&review);
     Ok(())
+}
+
+fn print_jev_review(review: &JevIngestReview) {
+    if review.html_rows.is_empty()
+        && review.game_types.is_empty()
+        && review.team_alignments.is_empty()
+        && review.failures == 0
+    {
+        return;
+    }
+    println!(
+        "jev review (advisory): html_rows={} game_types={} team_alignments={} failures={}",
+        review.html_rows.len(),
+        review.game_types.len(),
+        review.team_alignments.len(),
+        review.failures
+    );
+    for suggestion in review.game_types.iter().take(20) {
+        println!(
+            "jev game type: {} => {} ({})",
+            suggestion.season, suggestion.choice, suggestion.path
+        );
+    }
+    for suggestion in &review.team_alignments {
+        println!(
+            "jev team alignment: {} => {}",
+            suggestion.label, suggestion.suggested_slug
+        );
+    }
 }
 
 fn main() -> ExitCode {

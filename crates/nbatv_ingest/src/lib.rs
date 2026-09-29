@@ -11,7 +11,14 @@
 //! writes outside caller-supplied (test-temp) locations.
 
 pub mod crawl;
+mod jev_review;
 
+pub use jev_review::{
+    review_ingest_snapshots, JevGameTypeReview, JevHtmlRowReview, JevIngestReview,
+    JevTeamAlignmentReview,
+};
+
+use nbatv_catalog::HtmlRowChoice;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -1307,6 +1314,16 @@ pub enum FetchError {
     /// client). Distinct from [`FetchError::Client`] so a crawl driver can
     /// dead-pool a permanently missing page instead of retrying it.
     NotFound(String),
+    /// The source answered "slow down" (HTTP 429/503): the crawl is
+    /// exceeding its rate budget and must back off before retrying.
+    Throttled(String),
+    /// An HTTP response with bounded evidence that is not already decided by
+    /// status. Optional classification may inspect it; deterministic crawl
+    /// behavior remains the fallback.
+    Unclassified {
+        status: Option<u16>,
+        evidence: String,
+    },
     Decode(String),
 }
 
@@ -1317,6 +1334,11 @@ impl fmt::Display for FetchError {
             FetchError::Io(e) => write!(f, "snapshot I/O: {e}"),
             FetchError::Client(s) => write!(f, "fetch failed: {s}"),
             FetchError::NotFound(s) => write!(f, "page not found: {s}"),
+            FetchError::Throttled(s) => write!(f, "throttled: {s}"),
+            FetchError::Unclassified { status, evidence } => write!(
+                f,
+                "unclassified fetch response (status {status:?}): {evidence}"
+            ),
             FetchError::Decode(s) => write!(f, "bad snapshot bytes: {s}"),
         }
     }
@@ -2748,6 +2770,35 @@ use nbatv_db::{
 };
 use rusqlite::Connection;
 
+/// One parser row that was not claimed as a Game, Team, or player record.
+/// Jev may add a report-only classification but never creates archive rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HtmlRowQuarantine {
+    pub path: String,
+    pub table: String,
+    pub row: usize,
+    pub heading: String,
+    pub fragment: String,
+    pub classification: Option<HtmlRowChoice>,
+}
+
+/// Visible source label and observed Season span for an unknown Team slug.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownTeamEvidence {
+    pub slug: String,
+    pub label: String,
+    pub seasons: Vec<String>,
+}
+
+/// One schedule row with an explicit competition marker in its own HTML.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameTypeEvidence {
+    pub path: String,
+    pub season: String,
+    pub game_id: String,
+    pub row_text: String,
+}
+
 /// One run of the snapshot builder. State counters (`seasons`..`games_*`)
 /// describe what the archive holds after the run and are stable across
 /// re-ingests; the `inserted_*`/`upgraded_*` counters describe the writes
@@ -2757,6 +2808,10 @@ pub struct IngestReport {
     pub seasons: usize,
     pub teams: usize,
     pub games: usize,
+    /// Schedule rows left `REGULAR` because the source had no round marker.
+    /// A future round-aware ingest may replace these only with a validated
+    /// database enum value; this report does not mutate them.
+    pub regular_fallback_games: usize,
     pub games_with_box: usize,
     pub games_without_box: usize,
     /// Box snapshot present but its team sides disagree with the schedule:
@@ -2775,6 +2830,9 @@ pub struct IngestReport {
     /// Team slugs not in [`TEAM_CITY_NAME`]: stored with slug-shaped names
     /// so games stay browsable, and reported for the crosswalk to grow.
     pub unknown_team_slugs: Vec<String>,
+    pub unknown_team_evidence: Vec<UnknownTeamEvidence>,
+    pub game_type_evidence: Vec<GameTypeEvidence>,
+    pub html_quarantine: Vec<HtmlRowQuarantine>,
     pub inserted_box_teams: usize,
     pub inserted_box_players: usize,
     pub inserted_season_total_rows: usize,
@@ -2957,9 +3015,15 @@ fn sorted_entries(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
 /// The whole run commits atomically; teams are re-upserted from the full
 /// crawl's observed span so a grown crawl widens the spans wholesale.
 pub fn ingest_snapshot_dir(conn: &Connection, root: &Path) -> Result<IngestReport, IngestError> {
+    let review_input = jev_review::collect_snapshot_review_input(root)?;
     nbatv_db::create_schema(conn)?;
     let tx = conn.unchecked_transaction()?;
-    let mut report = IngestReport::default();
+    let mut report = IngestReport {
+        unknown_team_evidence: review_input.unknown_teams,
+        game_type_evidence: review_input.game_types,
+        html_quarantine: review_input.html_quarantine,
+        ..IngestReport::default()
+    };
     let mut team_spans: BTreeMap<String, (i32, i32)> = BTreeMap::new();
 
     for entry in sorted_entries(root)? {
@@ -3010,6 +3074,19 @@ pub fn ingest_snapshot_dir(conn: &Connection, root: &Path) -> Result<IngestRepor
 
     tx.commit()?;
     Ok(report)
+}
+
+/// Ingest snapshots deterministically, then run optional review against the
+/// committed result. Jev calls happen only after the SQLite transaction has
+/// committed and can never change archive identity or persisted values.
+pub fn ingest_snapshot_dir_with_jev(
+    conn: &Connection,
+    root: &Path,
+    judge: Option<&dyn nbatv_catalog::JevJudge>,
+) -> Result<(IngestReport, JevIngestReview), IngestError> {
+    let report = ingest_snapshot_dir(conn, root)?;
+    let review = review_ingest_snapshots(conn, root, &report, judge);
+    Ok((report, review))
 }
 
 fn ingest_season_dir(
@@ -3066,6 +3143,10 @@ fn ingest_season_dir(
     report.seasons += 1;
 
     for row in schedule.values() {
+        // The schedule source has no round marker. Keep the current
+        // deterministic `REGULAR` value and report the ambiguity; Jev
+        // must not silently rewrite archive identity.
+        report.regular_fallback_games += 1;
         for team in [row.home_br.as_str(), row.away_br.as_str()] {
             let span = team_spans
                 .entry(team.to_owned())

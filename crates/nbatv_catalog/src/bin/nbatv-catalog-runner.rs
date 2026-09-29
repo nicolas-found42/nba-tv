@@ -13,11 +13,20 @@
 //! `2` the run itself failed.
 
 use nbatv_catalog::{
-    fetch, parse_argv, run_backfill, usage, BackfillPorts, FfprobeDuration, IaProbe, MirrorConfig,
+    fetch, parse_argv, review_list_all_with_judge, run_backfill_with_judge, usage, BackfillPorts,
+    DirectHttpJev, DisabledJevJudge, FfprobeDuration, IaProbe, JevError, JevJudge, MirrorConfig,
     NbaProbe, PolitenessConfig, ProbeRegistry, RcloneMirror, Rung4Probe, YtdlpProbe, EXIT_OK,
     EXIT_RUN, EXIT_USAGE,
 };
 use std::path::Path;
+
+fn terminal_field(value: &str) -> String {
+    value
+        .chars()
+        .take(512)
+        .flat_map(char::escape_default)
+        .collect()
+}
 
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
@@ -56,12 +65,21 @@ fn run(
         .map_err(|err| format!("cannot open archive {}: {err}", db_path.display()))?;
     nbatv_db::create_schema(&conn).map_err(|err| format!("cannot create schema: {err}"))?;
 
+    let judge: Box<dyn JevJudge> = match DirectHttpJev::from_env() {
+        Ok(judge) => Box::new(judge),
+        Err(JevError::MissingApiKey) => Box::new(DisabledJevJudge),
+        Err(error) => {
+            eprintln!("nbatv-catalog: Jev disabled: {error}");
+            Box::new(DisabledJevJudge)
+        }
+    };
+
     // Live probe set: one probe per rung with an implementation. Rung 3 has
     // none yet — its rungs stay unswept (Sweeping, never absent) until one
     // lands, exactly as the sweep documents.
     let nba = NbaProbe::new();
-    let ia = IaProbe::live();
-    let ytdlp = YtdlpProbe::new();
+    let ia = IaProbe::live_with_env_jev();
+    let ytdlp = YtdlpProbe::new_with_env_jev();
     let rung4 = Rung4Probe::new();
     let mut registry = ProbeRegistry::new();
     registry
@@ -84,13 +102,38 @@ fn run(
         cache_root: fetch::cache_root(),
     };
 
-    let report =
-        run_backfill(&conn, &args.backfill_config(), &ports).map_err(|err| err.to_string())?;
+    let report = run_backfill_with_judge(&conn, &args.backfill_config(), &ports, judge.as_ref())
+        .map_err(|err| err.to_string())?;
     println!("{}", report.summary());
+    let reviews = review_list_all_with_judge(&conn, judge.as_ref(), "")
+        .map_err(|error| format!("cannot prioritize review list: {error}"))?;
+    if !reviews.is_empty() {
+        println!("review priorities ({} total):", reviews.len());
+        for item in reviews.iter().take(20) {
+            println!(
+                "  {} | {} | {} | {}",
+                terminal_field(&item.game_id),
+                terminal_field(&item.rung_name),
+                terminal_field(&item.title),
+                terminal_field(&item.url_or_pointer)
+            );
+        }
+    }
     if let nbatv_catalog::MirrorOutcome::RemoteMissing { remote } = &report.mirror.outcome {
         let prompt = nbatv_catalog::drive_sign_in_prompt(&ports.mirror_config);
         println!("{prompt} (missing remote: {remote})");
     }
     let _ = EXIT_OK;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_field;
+
+    #[test]
+    fn terminal_field_escapes_controls_and_caps_metadata() {
+        assert_eq!(terminal_field("title\n\x1b[2J"), "title\\n\\u{1b}[2J");
+        assert_eq!(terminal_field(&"x".repeat(513)).len(), 512);
+    }
 }
