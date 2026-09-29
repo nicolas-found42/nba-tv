@@ -23,10 +23,10 @@
 //!   out, unknown-length tapes survive for the scorer to judge by title.
 //! - `--sleep-requests <s>` from [`PolitenessConfig::ytdlp_request_sleep`]:
 //!   seconds between extraction requests. yt-dlp applies it between *every*
-//!   request, which subsumes the config's every-N count (sleeping every
-//!   request is at least as polite as every Nth) — there is no every-N flag
-//!   upstream, so the count rides along unused rather than via a hand-rolled
-//!   sleep. The probe never calls `thread::sleep` itself.
+//!   request, which is at least as polite as any every-N scheme — there is
+//!   no every-N flag upstream (verified against the installed yt-dlp's
+//!   `--help`), so the sleep rides on yt-dlp itself. The probe never calls
+//!   `thread::sleep`.
 //! - `--socket-timeout 30`: bounds each request so one stalled game cannot
 //!   hang the sequential sweep.
 //!

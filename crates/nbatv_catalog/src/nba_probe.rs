@@ -17,13 +17,17 @@
 //! carries nav only (no per-game addressing), which is exactly why the
 //! series-landing-plus-note shape is the honest one.
 //!
-//! Monthly re-enumeration (ladder v2 §3: "rung 0 re-enumerated monthly"): the
-//! table carries a [`NBA_CATALOG_VERIFIED`] stamp; [`nba_catalog_due`] reports
-//! when a stored rung-0 row is older than [`NBA_CATALOG_REFRESH_DAYS`], and
-//! [`nba_rescan_hint`] encodes the same cadence in the shared [`RescanHint`]
-//! shape. Refresh procedure: re-run the verification command below, update the
-//! table, bump the stamp. The sweep's 90-day rescan window stays the outer
-//! bound; this monthly cadence governs the catalog data itself.
+//! Monthly re-check cadence (ladder v2 §3: "rung 0 re-enumerated monthly"):
+//! the table is a STATIC, hand-verified snapshot — the probe performs no
+//! HTTP and nothing re-enumerates automatically. [`NBA_CATALOG_VERIFIED`]
+//! stamps when the table was last verified against the live surface;
+//! [`nba_catalog_due`] reports when a stored rung-0 row is older than
+//! [`NBA_CATALOG_REFRESH_DAYS`], and [`nba_rescan_hint`] encodes the same
+//! cadence in the shared [`RescanHint`] shape. The sweep's 90-day rescan
+//! window stays the outer bound; the 30-day cadence governs the catalog
+//! data, and acting on it is a MANUAL step: re-run the verification command
+//! below, update the table, bump the stamp. (README states the same manual
+//! re-verification; the wording here is kept consistent with it.)
 //!
 //! Verification command (a human re-runs this monthly; each run spends smoke
 //! budget — at most 4 outbound requests, ≥5s apart, identifying UA, no media):
@@ -67,10 +71,12 @@ pub const NBA_HELP_URL: &str = "https://support.watch.nba.com/hc/en-us/articles/
 pub const NBA_WATCH_URL: &str = "https://www.nba.com/watch/featured";
 
 /// Date the static table was last verified against the live surface
-/// (`YYYY-MM-DD`). Bump on each monthly re-enumeration.
+/// (`YYYY-MM-DD`). Bump on each manual monthly re-verification (re-run the
+/// smoke command, update the table, bump this stamp).
 pub const NBA_CATALOG_VERIFIED: &str = "2026-09-08";
 
-/// Rung-0 catalog re-enumeration cadence in days (ladder v2 §3: monthly).
+/// Rung-0 re-check cadence in days (ladder v2 §3: monthly; acting on it
+/// is a manual re-verification of the static table).
 pub const NBA_CATALOG_REFRESH_DAYS: u64 = 30;
 
 /// One Finals series in the free tier: season (ending year) plus the two
@@ -90,8 +96,8 @@ pub struct FinalsEntry {
 }
 
 /// Every NBA Finals series since 1990 (free tier scope per the Help Center).
-/// One entry per season ending year; re-enumerated monthly (see
-/// [`NBA_CATALOG_VERIFIED`]).
+/// One entry per season ending year; a static, hand-verified snapshot (see
+/// [`NBA_CATALOG_VERIFIED`] for the verification stamp).
 pub const FINALS_CATALOG: &[FinalsEntry] = &[
     FinalsEntry {
         season: 1990,
@@ -345,6 +351,17 @@ pub const FINALS_CATALOG: &[FinalsEntry] = &[
         team_a_name: "Oklahoma City Thunder",
         team_b_name: "Indiana Pacers",
     },
+    // 2026 Finals verified 2026-09-29: NYK def. SAS 4-1, June 3-13, 2026
+    // (Wikipedia "2026 NBA Finals"; Basketball-Reference
+    // "2026-nba-finals-knicks-vs-spurs"). Table cutoff = NBA_CATALOG_VERIFIED;
+    // later seasons need a manual re-verification before an entry lands.
+    FinalsEntry {
+        season: 2026,
+        team_a: "NYK",
+        team_b: "SAS",
+        team_a_name: "New York Knicks",
+        team_b_name: "San Antonio Spurs",
+    },
 ];
 
 /// The catalog entry for a season ending year, if the free tier covers it.
@@ -452,7 +469,7 @@ fn candidate_for(entry: &FinalsEntry) -> ProbeCandidate {
              in the NBA Classic Games free tier with an NBA ID: NBA App or \
              site (Watch → Featured → Classic Games). Watch-elsewhere pointer: \
              per-game deep links rarely exist, so start at {} and find the \
-             {} Finals series. Static catalog verified {}; re-enumerated monthly.",
+             {} Finals series. Static catalog verified {}; re-verification is manual.",
             entry.season,
             entry.team_a_name,
             entry.team_b_name,
@@ -467,7 +484,7 @@ fn candidate_for(entry: &FinalsEntry) -> ProbeCandidate {
 }
 
 /// `YYYY-MM-DD` (prefix) to days since the Unix epoch (Howard Hinnant's
-/// days-from-civil; std-only, no date dependency).
+/// days-from-civil via [`crate::civil`]; std-only, no date dependency).
 fn ymd_to_days(s: &str) -> Option<i64> {
     let (year, month, day) = parse_ymd(s)?;
     Some(days_from_civil(
@@ -493,12 +510,7 @@ fn parse_ymd(s: &str) -> Option<(i32, u32, u32)> {
 }
 
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
+    crate::civil::days_from_civil(year, month, day)
 }
 
 /// The rung-0 probe: static Finals catalog, no network, no quota.
@@ -558,8 +570,8 @@ mod tests {
     #[test]
     fn catalog_covers_every_finals_since_1990_without_gaps() {
         let seasons: Vec<u16> = FINALS_CATALOG.iter().map(|e| e.season).collect();
-        let expected: Vec<u16> = (1990u16..=2025).collect();
-        assert_eq!(seasons, expected, "one entry per Finals series 1990–2025");
+        let expected: Vec<u16> = (1990u16..=2026).collect();
+        assert_eq!(seasons, expected, "one entry per Finals series 1990–2026");
         for entry in FINALS_CATALOG {
             for slug in [entry.team_a, entry.team_b] {
                 assert_eq!(slug.len(), 3, "BR slug shape for {slug}");
