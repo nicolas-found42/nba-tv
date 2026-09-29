@@ -144,7 +144,7 @@ fn reject_probes() -> (
 // ---- Acceptance: first LIKELY-or-better wins, sweep stops ascending --------
 
 #[test]
-fn first_likely_wins_and_stops_ascending() {
+fn first_likely_wins_at_a_byte_class_rung_stops_ascending() {
     let conn = seeded_conn();
     let p0 = scripted(0, likely_evidence());
     let p1 = scripted(1, confirmed_evidence());
@@ -159,25 +159,83 @@ fn first_likely_wins_and_stops_ascending() {
     assert_eq!(report.status, SweepStatus::Playable { rank: 0 });
     assert_eq!(
         report.probed,
-        vec![0],
-        "sweep stops at the first LIKELY+ rung"
+        vec![0, 1],
+        "rung 0 wins record the pointer but continue to the byte-class rung; \
+         the rung-1 win stops the ascent"
     );
     assert_eq!(p0.calls(), 1);
-    assert_eq!(p1.calls(), 0, "higher rungs are never probed after a win");
+    assert_eq!(p1.calls(), 1, "rung 1 is probed after a rung-0 win");
+    assert_eq!(p2.calls(), 0, "the byte-class win stops the ascent");
 
+    // Both LIKELY rows persist: rank 0 (pointer) and rank 1 (bytes).
     let tapes = nbatv_db::tape_sources_for(&conn, GAME_ID).unwrap();
-    assert_eq!(tapes.len(), 1);
+    assert_eq!(tapes.len(), 2);
     assert_eq!(tapes[0].rank, 0);
     assert_eq!(
         tapes[0].url_or_pointer,
         "https://www.youtube.com/watch?v=ABCDEFGHIJK"
     );
+    assert_eq!(tapes[1].rank, 1);
 
-    // Only the probed rung records a query row.
+    // Only the probed rungs record query rows.
     let queries = nbatv_db::game_queries_for(&conn, GAME_ID).unwrap();
-    assert_eq!(queries.len(), 1);
+    assert_eq!(queries.len(), 2);
     assert_eq!(queries[0].rung, 0);
     assert_eq!(queries[0].best_match_level, "likely");
+    assert_eq!(queries[1].rung, 1);
+}
+
+/// The spec #18/#4 case: rung 0's static pointer must not mask the IA byte
+/// copy. The IA candidate carries full-game length, so rung 1 wins
+/// CONFIRMED after the rung-0 LIKELY pointer is recorded.
+#[test]
+fn rung0_pointer_win_continues_to_the_byte_class_rung() {
+    let conn = seeded_conn();
+    // Rung 0 wins LIKELY; rung 1 answers with CONFIRMED full-game bytes.
+    let p0 = scripted(0, likely_evidence());
+    let p1 = scripted(1, confirmed_evidence());
+    let mut reg = ProbeRegistry::new();
+    reg.register(&p0).register(&p1);
+    let mut quota = quota();
+
+    let report = sweep_game(&conn, &ctx(), &reg, &polite(), &mut quota, T0).unwrap();
+
+    assert_eq!(
+        report.probed,
+        vec![0, 1],
+        "the sweep continues past a rung-0 LIKELY win"
+    );
+    assert_eq!(report.status, SweepStatus::Playable { rank: 0 });
+    let tapes = nbatv_db::tape_sources_for(&conn, GAME_ID).unwrap();
+    assert_eq!(tapes.len(), 2, "pointer and byte rows both persist");
+    assert_eq!(tapes[0].rank, 0);
+    assert_eq!(tapes[1].rank, 1);
+    assert_eq!(tapes[1].match_confidence, 1.0, "bytes win CONFIRMED");
+}
+
+/// Once rung 1 has recorded a win, a rescan inside the window resumes from
+/// stored rows: the fresh rung-1 win stops the ascent (byte-class rung).
+#[test]
+fn fresh_byte_class_win_stops_the_ascent_on_rescan() {
+    let conn = seeded_conn();
+    let p0 = scripted(0, likely_evidence());
+    let p1 = scripted(1, confirmed_evidence());
+    let p2 = scripted(2, reject_evidence());
+    let p3 = scripted(3, reject_evidence());
+    let p4 = scripted(4, reject_evidence());
+    let reg = all_reject_registry(&p0, &p1, &p2, &p3, &p4);
+    let mut quota = quota();
+    sweep_game(&conn, &ctx(), &reg, &polite(), &mut quota, T0).unwrap();
+    let calls_after_first = p0.calls() + p1.calls() + p2.calls();
+
+    let second = sweep_game(&conn, &ctx(), &reg, &polite(), &mut quota, "2026-01-15").unwrap();
+    assert_eq!(
+        second.probed,
+        Vec::<u8>::new(),
+        "everything is inside its rescan window"
+    );
+    assert_eq!(p0.calls() + p1.calls() + p2.calls(), calls_after_first);
+    assert_eq!(second.status, SweepStatus::Playable { rank: 0 });
 }
 
 #[test]
@@ -415,8 +473,6 @@ fn politeness_config_reaches_probes_untouched() {
     let cfg = PolitenessConfig {
         ia_request_min_interval: Duration::from_secs(9),
         ytdlp_request_sleep: Duration::from_secs(3),
-        ytdlp_sleep_requests: 4,
-        max_concurrent_probes: 1,
         youtube_daily_limit: 100,
     };
 

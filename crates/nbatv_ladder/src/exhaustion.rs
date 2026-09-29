@@ -27,7 +27,7 @@ impl RecordedQuery {
     ) -> Self {
         Self {
             game_id: game_id.into(),
-            rank: rank,
+            rank,
             query_text: query_text.into(),
             verified_at: verified_at.into(),
         }

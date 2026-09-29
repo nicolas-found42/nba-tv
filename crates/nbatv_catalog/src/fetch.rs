@@ -193,21 +193,31 @@ impl ScriptStep {
 impl ScriptedFetcher {
     /// Fake over an explicit script: call N consumes step N (extra calls
     /// repeat the last step, so an always-failing script proves the retry
-    /// bound instead of panicking).
-    pub fn new(steps: Vec<ScriptStep>) -> Self {
-        assert!(
-            !steps.is_empty(),
-            "a scripted fetch needs at least one step"
-        );
-        Self {
+    /// bound instead of panicking). At least one step is required — an
+    /// empty script is a test-construction bug, so it returns `None` for
+    /// the caller to surface.
+    pub fn new(steps: Vec<ScriptStep>) -> Option<Self> {
+        if steps.is_empty() {
+            return None;
+        }
+        Some(Self {
             steps,
             calls: std::sync::atomic::AtomicU32::new(0),
-        }
+        })
     }
 
     /// How many fetch calls the fake has served.
     pub fn calls(&self) -> u32 {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The step for call N: the Nth step, or the last one once the script
+    /// is exhausted. Infallible for a non-empty script (enforced by
+    /// [`ScriptedFetcher::new`]); an empty script serves the empty step.
+    fn step_for(&self, attempt: u32) -> &ScriptStep {
+        let last = self.steps.len().saturating_sub(1);
+        let at = ((attempt as usize).saturating_sub(1)).min(last);
+        &self.steps[at]
     }
 }
 
@@ -218,26 +228,38 @@ impl TapeFetcher for ScriptedFetcher {
 
     fn fetch(&self, spec: &FetchSpec) -> FetchOutcome {
         let attempt = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        let step = self
-            .steps
-            .get((attempt - 1) as usize)
-            .unwrap_or_else(|| self.steps.last().unwrap())
-            .clone();
+        let step = self.step_for(attempt).clone();
         let resumed = spec.dest.exists();
         let append = |bytes: &[u8]| {
             if let Some(parent) = spec.dest.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
             use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
+            let mut file = match std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&spec.dest)
-                .expect("scripted fetch must write its bytes");
-            file.write_all(bytes)
-                .expect("scripted fetch must write its bytes");
+            {
+                Ok(file) => file,
+                Err(err) => {
+                    // The scripted fake never touches the network; an
+                    // unwritable destination is an honest failed attempt,
+                    // not a panic.
+                    return err.to_string();
+                }
+            };
+            if let Err(err) = file.write_all(bytes) {
+                return err.to_string();
+            }
+            String::new()
         };
-        append(&step.append_bytes);
+        let write_error = append(&step.append_bytes);
+        if !write_error.is_empty() {
+            return FetchOutcome::Failed {
+                attempts: attempt,
+                reason: format!("scripted fetch could not write {spec:?}: {write_error}"),
+            };
+        }
         let bytes = std::fs::metadata(&spec.dest).map(|m| m.len()).unwrap_or(0);
         if step.succeed {
             FetchOutcome::Completed {
@@ -263,6 +285,10 @@ const CURL_MAX_TIME_SECS: u64 = 300;
 /// Contact UA for live tape requests (private-research posture).
 const FETCH_USER_AGENT: &str = "nba-tv-personal-archive/private-research-contact-local";
 
+/// One scripted or live curl attempt: the exact argv, `Ok` on success or
+/// the failure reason. The seam's type, named once.
+type CurlRunner = Box<dyn Fn(&[String]) -> Result<(), String> + Send + Sync>;
+
 /// Live [`TapeFetcher`]: `curl -fL -C -` with the archive contact UA. `-C -`
 /// resumes from the partial file when one exists, so an interrupted
 /// download continues instead of restarting; the attempt loop bounds total
@@ -286,7 +312,7 @@ pub struct CurlFetcher {
     curl_bin: String,
     max_time_secs: u64,
     user_agent: String,
-    run: Option<Box<dyn Fn(&[String]) -> Result<(), String> + Send + Sync>>,
+    run: Option<CurlRunner>,
 }
 
 impl CurlFetcher {
@@ -304,7 +330,7 @@ impl CurlFetcher {
     /// receives the exact argv the live transport would run and reports the
     /// attempt outcome, so tests prove the retry bound and the resume flag
     /// without touching the network.
-    pub fn with_runner(run: Box<dyn Fn(&[String]) -> Result<(), String> + Send + Sync>) -> Self {
+    pub fn with_runner(run: CurlRunner) -> Self {
         Self {
             curl_bin: "curl".to_owned(),
             max_time_secs: CURL_MAX_TIME_SECS,
@@ -333,7 +359,9 @@ impl CurlFetcher {
     }
 
     fn run_live(&self, argv: &[String]) -> Result<(), String> {
-        let (bin, args) = argv.split_first().expect("curl argv is never empty");
+        let Some((bin, args)) = argv.split_first() else {
+            return Err("curl: empty argv (internal misuse)".to_owned());
+        };
         Command::new(bin)
             .args(args)
             .output()
@@ -735,7 +763,8 @@ mod tests {
         let fetcher = ScriptedFetcher::new(vec![
             ScriptStep::fail_after(b"first-half-"),
             ScriptStep::complete(b"second-half"),
-        ]);
+        ])
+        .expect("scripted fetch is non-empty");
         let first = fetcher.fetch(&spec);
         assert!(
             matches!(first, FetchOutcome::Failed { .. }),
@@ -768,7 +797,8 @@ mod tests {
     fn retries_are_bounded_by_the_spec() {
         let dir = temp_dir("bound");
         let spec = spec_in(&dir, 3);
-        let fetcher = ScriptedFetcher::new(vec![ScriptStep::fail_after(b"shard")]);
+        let fetcher = ScriptedFetcher::new(vec![ScriptStep::fail_after(b"shard")])
+            .expect("scripted fetch is non-empty");
         let conn = memdb();
         let report = fetch_to_cache(
             &conn,
@@ -895,7 +925,8 @@ mod tests {
     fn verify_failure_never_yields_a_ready_row() {
         let dir = temp_dir("verifyfail");
         let spec = spec_in(&dir, 2);
-        let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(b"clip-bytes")]);
+        let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(b"clip-bytes")])
+            .expect("scripted fetch is non-empty");
         let conn = memdb();
         let report = fetch_to_cache(
             &conn,
@@ -924,7 +955,8 @@ mod tests {
     fn happy_path_records_a_ready_row() {
         let dir = temp_dir("happy");
         let spec = spec_in(&dir, 3);
-        let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&vec![7u8; 1024])]);
+        let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&[7u8; 1024])])
+            .expect("scripted fetch is non-empty");
         let conn = memdb();
         let report = fetch_to_cache(
             &conn,

@@ -108,11 +108,15 @@ impl RcloneOutput {
     }
 }
 
+/// One scripted or live rclone invocation: the exact argv, the output (or
+/// the reason the sidecar could not run). The seam's type, named once.
+type RcloneRunner = Box<dyn Fn(&[String]) -> Result<RcloneOutput, String> + Send + Sync>;
+
 /// Live [`RcloneMirror`]: the user-provisioned `rclone` sidecar. `rclone`
 /// must be on `PATH` and the remote configured externally.
 pub struct RcloneMirror {
     bin: String,
-    run: Option<Box<dyn Fn(&[String]) -> Result<RcloneOutput, String> + Send + Sync>>,
+    run: Option<RcloneRunner>,
 }
 
 impl RcloneMirror {
@@ -129,9 +133,7 @@ impl RcloneMirror {
     /// scripted outcome, so tests prove the copy-only invariant, the
     /// dry-run/apply argv difference, and the outcome mapping without
     /// touching the network or a real remote.
-    pub fn with_runner(
-        run: Box<dyn Fn(&[String]) -> Result<RcloneOutput, String> + Send + Sync>,
-    ) -> Self {
+    pub fn with_runner(run: RcloneRunner) -> Self {
         Self {
             bin: "rclone".to_owned(),
             run: Some(run),
@@ -142,7 +144,9 @@ impl RcloneMirror {
         match &self.run {
             Some(run) => run(argv),
             None => {
-                let (bin, args) = argv.split_first().expect("rclone argv is never empty");
+                let Some((bin, args)) = argv.split_first() else {
+                    return Err("rclone: empty argv (internal misuse)".to_owned());
+                };
                 Command::new(bin)
                     .args(args)
                     .output()

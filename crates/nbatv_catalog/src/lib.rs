@@ -13,6 +13,7 @@
 //! a [`YoutubeQuota`] tracker, and a `YYYY-MM-DD` timestamp. Everything is
 //! offline by construction — the suite links no network implementation.
 
+pub mod civil;
 pub mod drive;
 pub mod fetch;
 pub mod ia_probe;
@@ -30,9 +31,10 @@ pub use drive::{
     MirrorOutcome, MirrorReport, RcloneMirror, RcloneOutput,
 };
 pub use runner::{
-    ending_year_to_slug, expand_season_range, parse_argv, run_backfill, season_slug_to_ending_year,
-    usage, BackfillConfig, BackfillPorts, BackfillReport, RunnerArgs, RunnerError, DEFAULT_DB_PATH,
-    DEFAULT_MANIFEST_PATH, DEFAULT_MAX_RETRIES, EXIT_OK, EXIT_RUN, EXIT_USAGE,
+    ending_year_to_slug, exit_code_for_report, expand_season_range, parse_argv, run_backfill,
+    season_slug_to_ending_year, usage, BackfillConfig, BackfillPorts, BackfillReport, RunnerArgs,
+    RunnerError, DEFAULT_DB_PATH, DEFAULT_MANIFEST_PATH, DEFAULT_MAX_RETRIES, EXIT_OK, EXIT_RUN,
+    EXIT_USAGE,
 };
 
 pub use fetch::{

@@ -3,12 +3,20 @@
 //!
 //! [`sweep_game`] walks rungs 0–4 in ladder order for one game, reusing the
 //! existing [`evaluate_sweep`] verdicts. Per rung it either resumes from a
-//! fresh [`GameQuery`] row (inside the 90-day rescan window: never
-//! re-probed), calls the registered probe and records the outcome, or —
-//! with no probe and no history — leaves the rung unswept. The first
-//! LIKELY-or-better rung wins and stops the ascent; CONFIRMED/LIKELY write
+//! fresh [`GameQuery`] row (inside the rescan window: never re-probed),
+//! calls the registered probe and records the outcome, or — with no probe
+//! and no history — leaves the rung unswept. CONFIRMED/LIKELY write
 //! `tape_sources` rows, REVIEW evidence stays on the query row for
 //! [`review_list`], and Reject rows only prove the rung was consumed.
+//!
+//! Early-stop rule (byte-class continuation, issues #18/#4): the ascent
+//! stops at the first LIKELY-or-better win **at a byte-class rung** (rungs
+//! 1+4). A LIKELY win at rung 0 (the NBA Finals static catalog — an
+//! External Surface pointer that is LIKELY for every covered Finals game)
+//! records its pointer but the sweep CONTINUES to rung 1 and rung 4, so
+//! the byte-class IA copy is still probed and fetched for Finals games.
+//! Playback is unaffected: dispatch resolves in rank order, so the rank-0
+//! pointer wins whenever no byte-class row exists.
 //!
 //! Honesty rules, all deliberate:
 //!
@@ -112,9 +120,11 @@ pub fn rung_name(rung: u8) -> String {
 /// probes each remaining rung once, scores candidates with the catalog
 /// scorer, and persists everything: every executed query becomes a row
 /// (replacing stale ones), CONFIRMED/LIKELY winners become `tape_sources`
-/// rows, REVIEW evidence stays on the query row. Stops ascending at the
-/// first LIKELY-or-better rung. Returns the derived [`SweepStatus`] plus
-/// which rungs were actually probed.
+/// rows, REVIEW evidence stays on the query row. The ascent stops at the
+/// first LIKELY-or-better win at a byte-class rung (rungs 1+4); a LIKELY
+/// rung-0 win (static Finals pointer) records the pointer and the sweep
+/// continues to the byte-class rungs (see the module docs). Returns the
+/// derived [`SweepStatus`] plus which rungs were actually probed.
 ///
 /// `now` is the sweep timestamp (`YYYY-MM-DD`, an RFC 3339 prefix also
 /// works): it stamps new rows and anchors the 90-day freshness check.
@@ -139,14 +149,14 @@ pub fn sweep_game(
 
     for rung in 0u8..=4 {
         // Fresh rows inside the rung's rescan window resume without
-        // re-probing: the NBA catalog re-enumerates monthly (rung 0), the
-        // rest of the ladder re-checks after the ladder's 90-day cadence.
+        // re-probing: the NBA catalog (rung 0) re-checks on its 30-day
+        // cadence, the rest of the ladder after the ladder's 90-day one.
         if let Some(row) = stored.get(&rung) {
             if is_fresh(&row.queried_at, now_days, rescan_days(rung)) {
                 let best = parse_level(&row.best_match_level).unwrap_or(MatchLevel::Reject);
                 evals.push(stored_eval(&game.game_id, row, best));
-                if best >= MatchLevel::Likely {
-                    break; // Fresh win: stop ascending, never re-probed.
+                if best >= MatchLevel::Likely && !rung0_wins_continue(rung) {
+                    break; // Fresh win at a byte-class rung: stop ascending.
                 }
                 continue;
             }
@@ -194,23 +204,30 @@ pub fn sweep_game(
         nbatv_db::upsert_game_query(conn, &row)?;
         evals.push(stored_eval(&game.game_id, &row, best));
         if best >= MatchLevel::Likely {
-            let winner = outcome
+            // The winner is the candidate the verdict was computed from;
+            // a probe that returned no candidates cannot reach LIKELY, so
+            // the None arm is unreachable by construction — degrade to
+            // REVIEW evidence rather than panic.
+            if let Some(winner) = outcome
                 .candidates
                 .iter()
                 .find(|c| score_candidate(game, c) == best)
-                .expect("best verdict came from these candidates");
-            nbatv_db::upsert_tape_source(
-                conn,
-                &TapeSource {
-                    game_id: GameId(game.game_id.clone()),
-                    rank: rung,
-                    source_class: rung_name(rung).as_str().into(),
-                    url_or_pointer: winner.url_or_pointer.clone(),
-                    match_confidence: confidence_for(best),
-                    verified_at: now.to_owned(),
-                },
-            )?;
-            break;
+            {
+                nbatv_db::upsert_tape_source(
+                    conn,
+                    &TapeSource {
+                        game_id: GameId(game.game_id.clone()),
+                        rank: rung,
+                        source_class: rung_name(rung).as_str().into(),
+                        url_or_pointer: winner.url_or_pointer.clone(),
+                        match_confidence: confidence_for(best),
+                        verified_at: now.to_owned(),
+                    },
+                )?;
+                if !rung0_wins_continue(rung) {
+                    break;
+                }
+            }
         }
     }
     // Rungs never reached (early win) count as unconsumed — the win itself
@@ -312,6 +329,18 @@ fn stored_eval(game_id: &str, row: &GameQuery, best: MatchLevel) -> RungEvaluati
     )
 }
 
+/// Whether a LIKELY win at `rung` still lets the sweep ascend. Byte-class
+/// continuation (issues #18/#4): rung 0 is the NBA Finals static catalog —
+/// External Surface class, a pointer that is LIKELY for *every* Finals game
+/// the free tier covers — so an early stop there would leave the IA byte
+/// copy (rung 1) and any other byte-class rung (rung 4) unprobed and
+/// unfetched forever. A rung-0 win records its pointer and the sweep
+/// CONTINUES; the pointer still wins at play time because dispatch resolves
+/// in rank order. Wins at byte-class rungs (rungs 1+4) keep the early stop.
+fn rung0_wins_continue(rung: u8) -> bool {
+    rung == 0
+}
+
 /// Prior knowledge when a stale row exists, else an unconsumed rung.
 fn cached_or_missing(game_id: &str, cached: Option<&GameQuery>, rung: u8) -> RungEvaluation {
     match cached {
@@ -373,17 +402,7 @@ fn parse_date(s: &str) -> Option<i64> {
 }
 
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let adjusted_year = if month <= 2 { year - 1 } else { year };
-    let era = if adjusted_year >= 0 {
-        adjusted_year
-    } else {
-        adjusted_year - 399
-    } / 400;
-    let year_of_era = adjusted_year - era * 400;
-    let month_prime = (month + 9) % 12;
-    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146097 + day_of_era - 719468
+    crate::civil::days_from_civil(year, month, day)
 }
 
 #[cfg(test)]

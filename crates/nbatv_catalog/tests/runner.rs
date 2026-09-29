@@ -5,13 +5,13 @@
 //! implementations linked here are scripted fakes.
 
 use nbatv_catalog::runner::{
-    ending_year_to_slug, expand_season_range, parse_argv, run_backfill, season_slug_to_ending_year,
-    BackfillConfig, BackfillPorts,
+    ending_year_to_slug, exit_code_for_report, expand_season_range, parse_argv, run_backfill,
+    season_slug_to_ending_year, BackfillConfig, BackfillPorts, EXIT_OK, EXIT_RUN,
 };
 use nbatv_catalog::{
-    cache_path, src_tag_for_url, MirrorConfig, MirrorOutcome, PolitenessConfig, ProbeCandidate,
-    ProbeOutcome, ProbeRegistry, RcloneMirror, RcloneOutput, ScriptStep, ScriptedDuration,
-    ScriptedFetcher, ScriptedProbe,
+    cache_path, src_tag_for_url, MirrorConfig, MirrorOutcome, MirrorReport, PolitenessConfig,
+    ProbeCandidate, ProbeOutcome, ProbeRegistry, RcloneMirror, RcloneOutput, ScriptStep,
+    ScriptedDuration, ScriptedFetcher, ScriptedProbe,
 };
 use nbatv_db::rusqlite::Connection;
 use nbatv_db::{CacheState, GameRow, TapeSource};
@@ -174,8 +174,6 @@ fn polite() -> PolitenessConfig {
     PolitenessConfig {
         ia_request_min_interval: Duration::from_secs(9),
         ytdlp_request_sleep: Duration::from_secs(11),
-        ytdlp_sleep_requests: 3,
-        max_concurrent_probes: 1,
         youtube_daily_limit: 50,
     }
 }
@@ -249,7 +247,8 @@ fn backfill_runs_sweep_fetch_and_mirror_offline() {
     let manifest = dir.join("files-from.txt");
     let (p0, p1, p2, p3, p4) = winning_probes();
     let registry = reject_registry(&p0, &p1, &p2, &p3, &p4);
-    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&vec![7u8; 2048])]);
+    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&[7u8; 2048])])
+        .expect("scripted fetch is non-empty");
     let duration = ScriptedDuration::seconds(5400.0);
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mirror = fake_mirror(&calls);
@@ -311,7 +310,8 @@ fn season_range_selects_which_games_run() {
     let dir = temp_dir("range");
     let (p0, p1, p2, p3, p4) = winning_probes();
     let registry = reject_registry(&p0, &p1, &p2, &p3, &p4);
-    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&vec![7u8; 64])]);
+    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&[7u8; 64])])
+        .expect("scripted fetch is non-empty");
     let duration = ScriptedDuration::seconds(5400.0);
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mirror = fake_mirror(&calls);
@@ -338,7 +338,8 @@ fn limit_bounds_the_run_in_season_order() {
     let dir = temp_dir("limit");
     let (p0, p1, p2, p3, p4) = winning_probes();
     let registry = reject_registry(&p0, &p1, &p2, &p3, &p4);
-    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&vec![7u8; 64])]);
+    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&[7u8; 64])])
+        .expect("scripted fetch is non-empty");
     let duration = ScriptedDuration::seconds(5400.0);
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mirror = fake_mirror(&calls);
@@ -382,7 +383,8 @@ fn rescan_hinted_games_are_skipped_when_probed_is_empty() {
     let manifest = dir.join("files-from.txt");
     let (p0, p1, p2, p3, p4) = winning_probes();
     let registry = reject_registry(&p0, &p1, &p2, &p3, &p4);
-    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&vec![7u8; 64])]);
+    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&[7u8; 64])])
+        .expect("scripted fetch is non-empty");
     let duration = ScriptedDuration::seconds(5400.0);
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mirror = fake_mirror(&calls);
@@ -465,7 +467,8 @@ fn ready_rows_are_not_refetched_but_failed_rows_retry() {
     }
     let (p0, p1, p2, p3, p4) = winning_probes();
     let registry = reject_registry(&p0, &p1, &p2, &p3, &p4);
-    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&vec![7u8; 64])]);
+    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&[7u8; 64])])
+        .expect("scripted fetch is non-empty");
     let duration = ScriptedDuration::seconds(5400.0);
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mirror = fake_mirror(&calls);
@@ -491,7 +494,8 @@ fn ready_rows_are_not_refetched_but_failed_rows_retry() {
     let dir2 = temp_dir("clipfail");
     let (q0, q1, q2, q3, q4) = winning_probes();
     let registry2 = reject_registry(&q0, &q1, &q2, &q3, &q4);
-    let clip_fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(b"clip-bytes")]);
+    let clip_fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(b"clip-bytes")])
+        .expect("scripted fetch is non-empty");
     let clip_duration = ScriptedDuration::seconds(600.0);
     let calls2 = Arc::new(Mutex::new(Vec::new()));
     let mirror2 = fake_mirror(&calls2);
@@ -527,7 +531,8 @@ fn mirror_runs_once_with_the_configured_dry_run_flag() {
         let dir = temp_dir(if dry_run { "dry" } else { "apply" });
         let (p0, p1, p2, p3, p4) = winning_probes();
         let registry = reject_registry(&p0, &p1, &p2, &p3, &p4);
-        let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&vec![7u8; 64])]);
+        let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&[7u8; 64])])
+            .expect("scripted fetch is non-empty");
         let duration = ScriptedDuration::seconds(5400.0);
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mirror = fake_mirror(&calls);
@@ -566,7 +571,8 @@ fn remote_missing_surfaces_honestly_without_failing_the_run() {
     let dir = temp_dir("missing");
     let (p0, p1, p2, p3, p4) = winning_probes();
     let registry = reject_registry(&p0, &p1, &p2, &p3, &p4);
-    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&vec![7u8; 64])]);
+    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&[7u8; 64])])
+        .expect("scripted fetch is non-empty");
     let duration = ScriptedDuration::seconds(5400.0);
     // No remote configured: listremotes answers empty.
     let mirror = RcloneMirror::with_runner(Box::new(|argv: &[String]| {
@@ -693,7 +699,8 @@ fn fetch_destinations_use_the_research_15_naming() {
     let cache_root = dir.join("cache");
     let (p0, p1, p2, p3, p4) = winning_probes();
     let registry = reject_registry(&p0, &p1, &p2, &p3, &p4);
-    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&vec![7u8; 64])]);
+    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&[7u8; 64])])
+        .expect("scripted fetch is non-empty");
     let duration = ScriptedDuration::seconds(5400.0);
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mirror = fake_mirror(&calls);
@@ -749,7 +756,8 @@ fn non_byte_class_tape_rows_are_never_fetched() {
     let dir = temp_dir("nonfile");
     let (p0, p1, p2, p3, p4) = winning_probes();
     let registry = reject_registry(&p0, &p1, &p2, &p3, &p4);
-    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&vec![7u8; 2048])]);
+    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&[7u8; 2048])])
+        .expect("scripted fetch is non-empty");
     let duration = ScriptedDuration::seconds(5400.0);
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mirror = fake_mirror(&calls);
@@ -788,7 +796,8 @@ fn one_quota_is_shared_across_every_game_in_the_run() {
     let dir = temp_dir("quota");
     let (p0, p1, p2, p3, p4) = winning_probes();
     let registry = reject_registry(&p0, &p1, &p2, &p3, &p4);
-    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&vec![1u8; 8])]);
+    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(&[1u8; 8])])
+        .expect("scripted fetch is non-empty");
     let duration = ScriptedDuration::seconds(5400.0);
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mirror = fake_mirror(&calls);
@@ -807,11 +816,7 @@ fn one_quota_is_shared_across_every_game_in_the_run() {
         .iter()
         .map(|p| p.last_quota_remaining())
         .collect();
-    let seen: Vec<Option<u32>> = spendings
-        .iter()
-        .filter(|q| q.is_some())
-        .map(|q| *q)
-        .collect();
+    let seen: Vec<Option<u32>> = spendings.iter().filter(|q| q.is_some()).copied().collect();
     assert!(
         !seen.is_empty(),
         "at least one probe must observe the quota"
@@ -819,4 +824,124 @@ fn one_quota_is_shared_across_every_game_in_the_run() {
     for pair in seen.windows(2) {
         assert_eq!(pair[0], pair[1], "one budget shared across the whole run");
     }
+}
+
+// ---- Exit-code mapping (ticket #27 gap) ------------------------------------
+
+fn report_with(
+    dry_run: bool,
+    outcome: MirrorOutcome,
+    fetched_failed: usize,
+) -> nbatv_catalog::BackfillReport {
+    nbatv_catalog::BackfillReport {
+        games: 1,
+        swept: 1,
+        skipped: 0,
+        deferred: 0,
+        found: 1,
+        fetched_ready: 0,
+        fetched_failed,
+        mirror: MirrorReport {
+            entries: Vec::new(),
+            manifest_path: None,
+            dry_run,
+            outcome,
+        },
+    }
+}
+
+#[test]
+fn exit_codes_map_the_documented_gaps() {
+    use nbatv_catalog::EXIT_USAGE;
+    // Dry runs never fail on report content: nothing was supposed to move.
+    assert_eq!(
+        exit_code_for_report(&report_with(
+            true,
+            MirrorOutcome::RemoteMissing { remote: "r".into() },
+            3
+        )),
+        EXIT_OK
+    );
+    // An apply that uploads nothing (missing remote) pages, not green.
+    assert_eq!(
+        exit_code_for_report(&report_with(
+            false,
+            MirrorOutcome::RemoteMissing { remote: "r".into() },
+            0
+        )),
+        EXIT_RUN
+    );
+    // An apply with failed fetches is not a clean run either.
+    assert_eq!(
+        exit_code_for_report(&report_with(
+            false,
+            MirrorOutcome::Completed { files: 1 },
+            2
+        )),
+        EXIT_RUN
+    );
+    // A clean apply is OK.
+    assert_eq!(
+        exit_code_for_report(&report_with(
+            false,
+            MirrorOutcome::Completed { files: 3 },
+            0
+        )),
+        EXIT_OK
+    );
+    // Any non-completed apply outcome fails the run.
+    assert_eq!(
+        exit_code_for_report(&report_with(
+            false,
+            MirrorOutcome::Failed {
+                reason: "boom".into()
+            },
+            0
+        )),
+        EXIT_RUN
+    );
+    assert_eq!(
+        exit_code_for_report(&report_with(
+            false,
+            MirrorOutcome::LimitHit {
+                reason: "limit".into()
+            },
+            0
+        )),
+        EXIT_RUN
+    );
+    // Usage stays a distinct constant (0 OK / 1 USAGE / 2 RUN).
+    assert_eq!(EXIT_USAGE, 1);
+    assert_eq!(EXIT_OK, 0);
+    assert_eq!(EXIT_RUN, 2);
+}
+
+#[test]
+fn apply_runs_with_failures_exit_run_end_to_end() {
+    // Same fixtures as the clip-failure test above, but with dry_run=false:
+    // the report-level mapping must say RUN, not OK.
+    let conn = seeded_two_seasons();
+    let dir = temp_dir("apply-exit");
+    let (p0, p1, p2, p3, p4) = winning_probes();
+    let registry = reject_registry(&p0, &p1, &p2, &p3, &p4);
+    let fetcher = ScriptedFetcher::new(vec![ScriptStep::complete(b"clip-bytes")])
+        .expect("scripted fetch is non-empty");
+    let duration = ScriptedDuration::seconds(600.0);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mirror = fake_mirror(&calls);
+    let ports = BackfillPorts {
+        probes: registry,
+        politeness: PolitenessConfig::default(),
+        fetcher: &fetcher,
+        duration: &duration,
+        mirror: &mirror,
+        mirror_config: MirrorConfig::default(),
+        manifest_path: dir.join("files-from.txt"),
+        cache_root: dir.join("cache"),
+    };
+    let mut cfg = config("1946-47", "1946-47");
+    cfg.dry_run = false;
+    let report = run_backfill(&conn, &cfg, &ports).unwrap();
+    assert!(report.fetched_failed > 0);
+    assert_eq!(exit_code_for_report(&report), EXIT_RUN);
 }

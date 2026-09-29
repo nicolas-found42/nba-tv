@@ -296,10 +296,11 @@ impl IaProbe {
     }
 }
 
+/// One inventory hit: the identifier is the only field the probe reads —
+/// metadata fetches target `metadata/<identifier>`, and the item's title is
+/// read from the metadata response, not the search doc.
 struct SearchDoc {
     identifier: String,
-    #[allow(dead_code)]
-    title: String,
 }
 
 /// One `metadata` item: identity text plus its file list.
@@ -453,7 +454,6 @@ fn parse_search(body: &str) -> Result<Vec<SearchDoc>, IaError> {
                 if let Some(identifier) = doc.get("identifier").and_then(Json::as_str) {
                     docs.push(SearchDoc {
                         identifier: identifier.to_owned(),
-                        title: doc.get("title").and_then(Json::text).unwrap_or_default(),
                     });
                 }
             }
@@ -478,7 +478,7 @@ fn parse_metadata(body: &str) -> Result<MetadataItem, IaError> {
     let description = metadata
         .get("description")
         .and_then(Json::text)
-        .unwrap_or_default();
+        .unwrap_or_else(String::new);
     let mut files = Vec::new();
     if let Some(list) = root.get("files").and_then(Json::array) {
         for file in list {
@@ -874,7 +874,7 @@ mod tests {
         assert_eq!(
             value.as_str(),
             Some("Café Régime ⭐ 1996"),
-            "byte-wise `as char` would yield CafÃ© RÃ©gime â­ 1996"
+            "byte-wise `as char` would yield Caf\u{C3}\u{A9} R\u{C3}\u{A9}gime \u{E2}\u{AD} 1996"
         );
     }
 
@@ -913,7 +913,6 @@ mod tests {
         fn doc(identifier: &str) -> SearchDoc {
             SearchDoc {
                 identifier: identifier.to_owned(),
-                title: String::new(),
             }
         }
         let kept = prefer_year(

@@ -6,12 +6,15 @@
 //! yield is ≈ 0 (noise: 2K gameplay, vlogs, TikTok rips), and the rung stays
 //! because enumeration is free and re-scans are cheap.
 //!
-//! This probe therefore never claims a find: every call records one standing
-//! query whose text documents the method, with zero candidates expected. That
-//! standing record is what makes an all-rungs-empty sweep read **Unavailable**
-//! (honest: the rung was consumed) instead of **Sweeping** (never checked).
-//! It spends no YouTube quota and needs no politeness pacing (no HTTP here —
-//! the live keyless endpoints are re-checked by hand, not per game).
+//! Honesty about what this probe does: it performs NO HTTP. The keyless
+//! endpoints are not queried per game — the live corpus was re-checked by
+//! hand during research (07 §2.6–2.7) and found standing-empty for
+//! classic NBA full games. What the probe records is that standing
+//! empty-corpus verdict, in text that says plainly the per-game queries
+//! were not executed. That record is what makes an all-rungs-empty sweep
+//! read **Unavailable** (honest: the rung was consumed per the standing
+//! verdict) instead of **Sweeping** (never checked). It spends no YouTube
+//! quota and needs no politeness pacing.
 //!
 //! Playback note: rung 4 is file-class (progressive MP4, Cache
 //! Tier-eligible) *if content ever appears*; legality is Method clean (any
@@ -21,13 +24,16 @@ use crate::politeness::PolitenessConfig;
 use crate::probe::{GameContext, ProbeOutcome, SourceProbe};
 use nbatv_ladder::YoutubeQuota;
 
-/// Standing rung-4 query text for one game: names both keyless endpoints so
-/// the recorded row documents the method that was swept.
+/// Standing rung-4 query text for one game: names both keyless endpoints
+/// and states plainly that the per-game queries were NOT executed — the
+/// empty-corpus verdict comes from the research-time corpus check
+/// (research 07 §2.6–2.7), not from a live per-game call.
 pub fn rung4_query_text(game: &GameContext) -> String {
     format!(
-        "standing empty-corpus sweep for {} ({} @ {} {}): \
-         Odysee claim_search + PeerTube Sepia Search; \
-         zero candidates expected, corpus ~0 per ladder v2 rung 4",
+        "standing empty-corpus record for {} ({} @ {} {}): \
+         Odysee claim_search + PeerTube Sepia Search NOT executed per game \
+         (no HTTP here); rung left empty by the research-time corpus check \
+         (research 07), zero candidates expected, corpus ~0 per ladder v2 rung 4",
         game.game_id, game.away_team, game.home_team, game.date,
     )
 }
@@ -89,6 +95,10 @@ mod tests {
         assert!(outcome.query_text.contains("Odysee"), "{outcome:?}");
         assert!(outcome.query_text.contains("PeerTube"), "{outcome:?}");
         assert!(outcome.query_text.contains("194611010TRH"), "{outcome:?}");
+        assert!(
+            outcome.query_text.contains("NOT executed"),
+            "the record states plainly the per-game queries never ran: {outcome:?}"
+        );
     }
 
     #[test]

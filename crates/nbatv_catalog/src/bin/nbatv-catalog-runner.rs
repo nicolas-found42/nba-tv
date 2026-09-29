@@ -8,14 +8,30 @@
 //! lands), and runs sweep → fetch → one dry-run/apply mirror behind the live
 //! `curl`/`ffprobe`/`rclone` transports.
 //!
-//! Exit codes: `0` the run completed (fetch failures and a missing Drive
-//! remote live in the printed summary, honestly named), `1` a usage error,
-//! `2` the run itself failed.
+//! Exit codes ([`nbatv_catalog::exit_code_for_report`] computes it from the
+//! report; [`nbatv_catalog::EXIT_USAGE`] covers unusable argv, and any
+//! `run_backfill` error is RUN):
+//!
+//! - `0` OK: the run completed. Under `--dry-run` (the default) this is
+//!   every completed run — fetch failures and a missing Drive remote live
+//!   in the printed summary, honestly named, because nothing was supposed
+//!   to move.
+//! - `1` USAGE: the argv was unusable.
+//! - `2` RUN: the run itself failed. Under `--apply` this fires when the
+//!   mirror did not complete — including `RemoteMissing`, so an overnight
+//!   apply that uploads nothing pages the driver instead of looking green —
+//!   or when any fetch failed, or when `run_backfill` errored.
+//!
+//! YouTube quota note: the rung-2 budget is per-run. `run_backfill` mints
+//! one fresh [`nbatv_catalog::YoutubeQuota`] per process (from the
+//! politeness config's daily limit); nothing is persisted across runs, so
+//! each invocation gets the full daily budget and running the binary twice
+//! in a day may spend up to twice the single-run limit.
 
 use nbatv_catalog::{
-    fetch, parse_argv, run_backfill, usage, BackfillPorts, FfprobeDuration, IaProbe, MirrorConfig,
-    NbaProbe, PolitenessConfig, ProbeRegistry, RcloneMirror, Rung4Probe, YtdlpProbe, EXIT_OK,
-    EXIT_RUN, EXIT_USAGE,
+    exit_code_for_report, fetch, parse_argv, run_backfill, usage, BackfillPorts, FfprobeDuration,
+    IaProbe, MirrorConfig, NbaProbe, PolitenessConfig, ProbeRegistry, RcloneMirror, Rung4Probe,
+    YtdlpProbe, EXIT_RUN, EXIT_USAGE,
 };
 use std::path::Path;
 
@@ -35,17 +51,27 @@ fn main() {
             std::process::exit(EXIT_USAGE);
         }
     };
-    if let Err(reason) = run(&args.db_path, &args.manifest_path, &args) {
-        eprintln!("nbatv-catalog-runner: {reason}");
-        std::process::exit(EXIT_RUN);
+    let report = match run(&args.db_path, &args.manifest_path, &args) {
+        Ok(report) => report,
+        Err(reason) => {
+            eprintln!("nbatv-catalog-runner: {reason}");
+            std::process::exit(EXIT_RUN);
+        }
+    };
+    println!("{}", report.summary());
+    let mirror_config = MirrorConfig::default();
+    if let nbatv_catalog::MirrorOutcome::RemoteMissing { remote } = &report.mirror.outcome {
+        let prompt = nbatv_catalog::drive_sign_in_prompt(&mirror_config);
+        println!("{prompt} (missing remote: {remote})");
     }
+    std::process::exit(exit_code_for_report(&report));
 }
 
 fn run(
     db_path: &Path,
     manifest_path: &Path,
     args: &nbatv_catalog::RunnerArgs,
-) -> Result<(), String> {
+) -> Result<nbatv_catalog::BackfillReport, String> {
     if let Some(parent) = db_path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -84,13 +110,5 @@ fn run(
         cache_root: fetch::cache_root(),
     };
 
-    let report =
-        run_backfill(&conn, &args.backfill_config(), &ports).map_err(|err| err.to_string())?;
-    println!("{}", report.summary());
-    if let nbatv_catalog::MirrorOutcome::RemoteMissing { remote } = &report.mirror.outcome {
-        let prompt = nbatv_catalog::drive_sign_in_prompt(&ports.mirror_config);
-        println!("{prompt} (missing remote: {remote})");
-    }
-    let _ = EXIT_OK;
-    Ok(())
+    run_backfill(&conn, &args.backfill_config(), &ports).map_err(|err| err.to_string())
 }

@@ -37,8 +37,8 @@
 //! threaded [`PolitenessConfig`], the YouTube budget is shared across the
 //! whole run, fetch retries stop at `max_retries` per row, and the mirror is
 //! paced by [`MirrorConfig`] (`bwlimit`/`transfers`/`max-transfer`). The run
-//! itself is sequential — the `max_concurrent_probes = 1` shape — so there is
-//! no parallelism for the config to further govern.
+//! itself is sequential — one probe at a time — so no parallelism exists for
+//! a config knob to govern.
 //!
 //! Season slugs (`1946-47` style) order by ending year
 //! ([`season_slug_to_ending_year`]): `1946-47` → 1947, with the century
@@ -80,7 +80,9 @@
 //! next live smoke after a Drive remote is configured doubles as the first
 //! real upload preview.
 
-use crate::drive::{mirror_ready_entries, MirrorConfig, MirrorError, MirrorReport, RcloneMirror};
+use crate::drive::{
+    mirror_ready_entries, MirrorConfig, MirrorError, MirrorOutcome, MirrorReport, RcloneMirror,
+};
 use crate::fetch::{
     cache_path, fetch_to_cache, src_tag_for_url, DurationProbe, FetchSpec, TapeFetcher,
 };
@@ -403,12 +405,34 @@ pub const DEFAULT_MANIFEST_PATH: &str = "data/cache/drive-manifest.txt";
 /// Fetch attempts per row when `--max-retries` is absent.
 pub const DEFAULT_MAX_RETRIES: u32 = 3;
 
-/// Exit codes for the binary: the run completed (fetch failures and a
-/// missing remote live in the printed report), the argv was unusable, the
-/// run itself failed.
+/// Exit codes for the binary: `0` OK, `1` USAGE (unusable argv), `2` RUN
+/// (the run itself failed). See [`exit_code_for_report`].
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_USAGE: i32 = 1;
 pub const EXIT_RUN: i32 = 2;
+
+/// The process exit code for a completed backfill report (ticket #27 gap,
+/// fixed): a run is not "successful" when it uploaded nothing.
+///
+/// * `--dry-run` runs always exit [`EXIT_OK`] — nothing was supposed to
+///   move; fetch failures and a missing remote are report content.
+/// * Under `--apply`, a missing Drive remote ([`MirrorOutcome::RemoteMissing`])
+///   or any non-completed mirror outcome, as well as any fetch failure,
+///   exit [`EXIT_RUN`]: an overnight apply that uploads nothing or drops
+///   rows must page the driver, not look green. Everything else is
+///   [`EXIT_OK`].
+pub fn exit_code_for_report(report: &BackfillReport) -> i32 {
+    if report.mirror.dry_run {
+        return EXIT_OK;
+    }
+    let fetch_failed = report.fetched_failed > 0;
+    let mirror_failed = !matches!(report.mirror.outcome, MirrorOutcome::Completed { .. });
+    if fetch_failed || mirror_failed {
+        EXIT_RUN
+    } else {
+        EXIT_OK
+    }
+}
 
 /// The parsed binary argv: the season range plus the run knobs. `dry_run` is
 /// true unless `--apply` is given — bytes never leave the machine by
@@ -573,18 +597,11 @@ fn today_ymd() -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
-/// Howard Hinnant's civil-from-days inverse (std-only, no date dependency).
+/// Howard Hinnant's civil-from-days inverse via [`crate::civil`] (std-only,
+/// no date dependency). Takes Hinnant's `z` form (the epoch shift already
+/// applied) so the call site stays unchanged.
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let mut year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
-    year += i64::from(month <= 2);
-    (year, month, day)
+    crate::civil::civil_from_days(z - 719_468)
 }
 
 #[cfg(test)]
