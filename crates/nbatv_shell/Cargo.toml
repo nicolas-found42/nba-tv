@@ -1,0 +1,21 @@
+[package]
+name = "nbatv_shell"
+version = "0.1.0"
+edition = "2021"
+description = "Shell: app window and all browse screens (Home, Season dashboard, Team ledgers, Game view)"
+license = "MIT"
+
+[dependencies]
+eframe = "0.32"
+nbatv_catalog = { path = "../nbatv_catalog", version = "0.1.0" }
+nbatv_db = { path = "../nbatv_db", version = "0.1.0" }
+nbatv_player = { path = "../nbatv_player", version = "0.1.0" }
+raw-window-handle = "0.6"
+rusqlite = { version = "0.32", features = ["bundled"] }
+wry = { version = "0.45", optional = true }
+
+[features]
+lane-b = ["wry"]
+
+[lints]
+workspace = true

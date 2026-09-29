@@ -1,0 +1,27 @@
+# Build output
+target/
+
+# Local ingest snapshots (raw HTML/JSON kept so re-normalization never re-fetches)
+data/raw/
+# Downloaded game tape (Cache Tier local copies; rebuilt by fetch, never committed)
+data/cache/
+
+# Local archive database (real SQLite archive; rebuilt by ingest, never committed)
+data/archive.db*
+
+# Never commit media
+*.mp4
+*.mkv
+
+# Never commit secrets
+.env
+*.pem
+*.key
+
+# Editor / IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Lane B webview profile (vendor cookies/sign-in state; rebuilt by sign-in, never committed)
+data/webview-profile/

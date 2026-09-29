@@ -1,0 +1,12 @@
+[package]
+name = "nbatv_ingest"
+version = "0.1.0"
+edition = "2021"
+description = "Bootstrap ingest for the nba-tv personal NBA archive (FTE CSV, validators, snapshot ingest into the archive db)"
+
+[dependencies]
+nbatv_db = { path = "../nbatv_db" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[lints]
+workspace = true

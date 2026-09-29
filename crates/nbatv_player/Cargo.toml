@@ -1,0 +1,8 @@
+[package]
+name = "nbatv_player"
+version = "0.1.0"
+edition = "2021"
+description = "Player Backend lanes for the nba-tv archive: Lane A (ffmpeg-sidecar) and Lane B (sanctioned vendor embed)"
+license = "MIT"
+[lints]
+workspace = true

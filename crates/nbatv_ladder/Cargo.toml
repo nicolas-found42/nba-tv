@@ -1,0 +1,12 @@
+[package]
+name = "nbatv_ladder"
+version = "0.1.0"
+edition = "2021"
+description = "Source Ladder: fixed rung order, exhaustion runner, quota budget, collector pointers, YouTube crosswalk"
+license = "MIT"
+
+[lib]
+name = "nbatv_ladder"
+path = "src/lib.rs"
+[lints]
+workspace = true

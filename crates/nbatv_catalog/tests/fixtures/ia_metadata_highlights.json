@@ -1,0 +1,21 @@
+{
+  "files": [
+    {
+      "format": "MPEG4",
+      "length": "594.25",
+      "name": "1996 NBA Finals highlights reel.mp4",
+      "size": "48211488",
+      "source": "original"
+    },
+    {
+      "format": "Thumbnail",
+      "name": "1996-nba-finals-highlights.thumbs/reel_000001.jpg",
+      "source": "derivative"
+    }
+  ],
+  "metadata": {
+    "description": "Highlights from the 1996 NBA Finals.",
+    "identifier": "1996-nba-finals-highlights",
+    "title": "1996 NBA Finals Highlights"
+  }
+}
