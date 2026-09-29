@@ -19,7 +19,6 @@ use nbatv_db::{
     insert_team, BoxPlayerRow, BoxTeamRow, GameRow, SeasonRow, SeasonTotalRow, TeamRow,
 };
 use nbatv_ingest::{parse_games_page, validate_game_id};
-use rusqlite::Connection;
 
 /// Minimal BR `_games.html` shape: one played opener, one slugless future game.
 const GAMES_HTML: &str = "\
@@ -56,7 +55,7 @@ fn parsed_season_inserts_end_to_end_into_sqlite() {
     assert!(nbatv_db::is_valid_game_id(&game.game_id));
 
     // 2. Insert the full chain for that game (season + teams + game).
-    let conn = Connection::open_in_memory().expect("in-memory DB");
+    let conn = nbatv_db::open_in_memory().expect("in-memory DB");
     nbatv_db::create_schema(&conn).expect("schema");
     insert_season(
         &conn,

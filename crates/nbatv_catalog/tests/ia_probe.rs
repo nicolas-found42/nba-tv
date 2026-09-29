@@ -9,12 +9,12 @@ use nbatv_catalog::{
     score_candidate, sweep_game, GameContext, IaError, IaHttp, IaProbe, MatchLevel,
     PolitenessConfig, ProbeRegistry, SourceProbe, SweepStatus, YoutubeQuota,
 };
+use nbatv_db::rusqlite::Connection;
 use nbatv_db::{
     create_schema, game_queries_for, insert_game, insert_season, insert_team, tape_sources_for,
     GameRow, SeasonRow, TeamRow,
 };
 use parking_lot::Mutex;
-use rusqlite::Connection;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -100,7 +100,7 @@ fn instant_politeness() -> PolitenessConfig {
 }
 
 fn seeded_conn() -> Connection {
-    let conn = Connection::open_in_memory().expect("in-memory archive db");
+    let conn = nbatv_db::open_in_memory().expect("in-memory archive db");
     create_schema(&conn).expect("create_schema");
     insert_season(
         &conn,
@@ -305,8 +305,12 @@ fn sweep_populates_a_rung1_row_with_the_br_slug_crosswalk() {
     let rows = tape_sources_for(&conn, GAME_ID).expect("tape rows");
     assert_eq!(rows.len(), 1, "one rung-1 tape row: {rows:?}");
     assert_eq!(rows[0].rank, 1);
-    assert_eq!(rows[0].game_id, GAME_ID, "BR-slug crosswalk on the row");
-    assert_eq!(rows[0].source_class, "internet-archive");
+    assert_eq!(
+        rows[0].game_id,
+        nbatv_db::GameId(GAME_ID.to_owned()),
+        "BR-slug crosswalk on the row"
+    );
+    assert_eq!(rows[0].source_class, nbatv_db::SourceClass::InternetArchive);
     assert!(
         rows[0]
             .url_or_pointer

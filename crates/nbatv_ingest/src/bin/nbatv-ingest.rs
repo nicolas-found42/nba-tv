@@ -20,7 +20,6 @@
 //! stay as bare 0-0 schedule rows until a later crawl upgrades them.
 
 use nbatv_ingest::ingest_snapshot_dir;
-use rusqlite::Connection;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -77,7 +76,7 @@ fn run(args: &Args) -> Result<(), String> {
             args.raw
         ));
     }
-    let conn = Connection::open(&args.db)
+    let conn = nbatv_db::open(&args.db)
         .map_err(|e| format!("cannot open archive db {:?}: {e}", args.db))?;
     let report =
         ingest_snapshot_dir(&conn, &args.raw).map_err(|e| format!("ingest failed: {e}"))?;

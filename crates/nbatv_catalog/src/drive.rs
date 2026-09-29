@@ -30,7 +30,7 @@
 //! live in the returned [`MirrorReport`], and cache rows stay `Ready` so an
 //! interrupted or limited run resumes from what is stored.
 
-use rusqlite::Connection;
+use nbatv_db::rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -224,12 +224,12 @@ pub struct MirrorReport {
 /// a [`MirrorReport`] instead (including `Failed`).
 #[derive(Debug)]
 pub enum MirrorError {
-    Db(rusqlite::Error),
+    Db(nbatv_db::rusqlite::Error),
     Io(std::io::Error),
 }
 
-impl From<rusqlite::Error> for MirrorError {
-    fn from(err: rusqlite::Error) -> Self {
+impl From<nbatv_db::rusqlite::Error> for MirrorError {
+    fn from(err: nbatv_db::rusqlite::Error) -> Self {
         MirrorError::Db(err)
     }
 }
@@ -350,7 +350,7 @@ pub fn mirror_ready_entries(
         manifest.push_str(&rel);
         manifest.push('\n');
         entries.push(MirrorEntry {
-            game_id: row.game_id.clone(),
+            game_id: row.game_id.to_string(),
             local_path: row.local_path.clone(),
             remote_path: format!("{}:{rel}", config.remote),
         });
@@ -424,7 +424,7 @@ mod tests {
     use std::sync::Arc;
 
     fn memdb() -> Connection {
-        let conn = Connection::open_in_memory().expect("in-memory db");
+        let conn = nbatv_db::open_in_memory().expect("in-memory db");
         nbatv_db::create_schema(&conn).expect("create_schema");
         conn
     }
@@ -458,9 +458,9 @@ mod tests {
             "1947-48"
         };
         nbatv_db::CacheEntry {
-            game_id: game_id.to_owned(),
+            game_id: nbatv_db::GameId(game_id.to_owned()),
             rank,
-            source_class: "internet-archive".to_owned(),
+            source_class: nbatv_db::SourceClass::InternetArchive,
             local_path: format!("data/cache/tape/{season}/{game_id}__NYK-at-TRH__ia.mp4"),
             bytes: 1024,
             verified_at: (state == nbatv_db::CacheState::Ready).then(|| "2026-09-08".to_owned()),

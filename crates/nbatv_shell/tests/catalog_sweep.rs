@@ -10,17 +10,17 @@ use nbatv_catalog::{
     sweep_game, GameContext, ProbeCandidate, ProbeOutcome, ProbeRegistry, ScriptedProbe,
     SweepStatus, YoutubeQuota,
 };
+use nbatv_db::rusqlite::Connection;
 use nbatv_db::{
     create_schema, insert_game, insert_season, insert_team, GameRow, SeasonRow, TeamRow,
 };
 use nbatv_shell::{PlayDispatch, ShellApp, TapeState};
-use rusqlite::Connection;
 
 const GAME_ID: &str = "194611010TRH";
 const T0: &str = "2026-01-01";
 
 fn seeded_conn() -> Connection {
-    let conn = Connection::open_in_memory().expect("in-memory archive db");
+    let conn = nbatv_db::open_in_memory().expect("in-memory archive db");
     create_schema(&conn).expect("create_schema");
     insert_season(
         &conn,
@@ -211,9 +211,9 @@ fn pointer_only_game_shows_pointer() {
     nbatv_db::insert_tape_source(
         &conn,
         &nbatv_db::TapeSource {
-            game_id: GAME_ID.to_owned(),
+            game_id: nbatv_db::GameId(GAME_ID.to_owned()),
             rank: 5,
-            source_class: "collector-catalogs".to_owned(),
+            source_class: nbatv_db::SourceClass::Collector,
             url_or_pointer: "pointer:collector/194611010TRH".to_owned(),
             match_confidence: 1.0,
             verified_at: T0.to_owned(),

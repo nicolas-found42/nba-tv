@@ -42,7 +42,7 @@ fn archive_path(tag: &str) -> PathBuf {
 
 fn seed(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
-    let conn = rusqlite::Connection::open(path).expect("open archive file");
+    let conn = nbatv_db::open(path).expect("open archive file");
     create_schema(&conn).expect("create_schema");
     insert_season(
         &conn,
@@ -121,11 +121,11 @@ fn ia_sweep_populates_the_row_and_play_streams_lane_a() {
         .expect("known game sweeps");
     assert_eq!(report.status, SweepStatus::Playable { rank: 1 });
 
-    let conn = rusqlite::Connection::open(&path).expect("reopen archive");
+    let conn = nbatv_db::open(&path).expect("reopen archive");
     let rows = tape_sources_for(&conn, GAME_ID).expect("tape rows");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].rank, 1);
-    assert_eq!(rows[0].source_class, "internet-archive");
+    assert_eq!(rows[0].source_class, nbatv_db::SourceClass::InternetArchive);
     assert!(
         rows[0]
             .url_or_pointer

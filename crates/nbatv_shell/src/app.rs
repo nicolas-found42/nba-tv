@@ -112,7 +112,7 @@ impl ShellApp {
     /// Headless db tests: take ownership of an already-seeded connection
     /// (callers run `create_schema` plus inserts first; the schema is
     /// ensured again idempotently here).
-    pub fn from_connection(conn: rusqlite::Connection) -> Self {
+    pub fn from_connection(conn: nbatv_db::rusqlite::Connection) -> Self {
         Self::with_store(Store::Db(DbStore::from_connection(conn)))
     }
 
@@ -1082,7 +1082,7 @@ mod tests {
     }
 
     fn cached_game_db(state: nbatv_db::CacheState) -> ShellApp {
-        let conn = rusqlite::Connection::open_in_memory().expect("in-memory archive db");
+        let conn = nbatv_db::open_in_memory().expect("in-memory archive db");
         nbatv_db::create_schema(&conn).expect("create_schema");
         nbatv_db::insert_game(
             &conn,
@@ -1109,9 +1109,9 @@ mod tests {
         nbatv_db::insert_tape_source(
             &conn,
             &nbatv_db::TapeSource {
-                game_id: "194611010TRH".to_owned(),
+                game_id: nbatv_db::GameId("194611010TRH".to_owned()),
                 rank: 1,
-                source_class: "internet-archive".to_owned(),
+                source_class: nbatv_db::SourceClass::InternetArchive,
                 url_or_pointer: "https://archive.org/download/194611010TRH/game.mp4".to_owned(),
                 match_confidence: 1.0,
                 verified_at: "2026-09-08".to_owned(),
@@ -1121,9 +1121,9 @@ mod tests {
         nbatv_db::upsert_cache_entry(
             &conn,
             &nbatv_db::CacheEntry {
-                game_id: "194611010TRH".to_owned(),
+                game_id: nbatv_db::GameId("194611010TRH".to_owned()),
                 rank: 1,
-                source_class: "internet-archive".to_owned(),
+                source_class: nbatv_db::SourceClass::InternetArchive,
                 local_path: "data/cache/tape/1946-47/194611010TRH__NYK-at-TRH__ia.mp4".to_owned(),
                 bytes: 714_000_000,
                 verified_at: if state == nbatv_db::CacheState::Ready {

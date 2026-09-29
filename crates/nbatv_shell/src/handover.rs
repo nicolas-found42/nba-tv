@@ -68,9 +68,9 @@ pub fn dispatch_for(
     let player_sources: Vec<nbatv_player::TapeSource> = sources
         .iter()
         .map(|source| nbatv_player::TapeSource {
-            game_id: source.game_id.clone(),
+            game_id: source.game_id.to_string(),
             rank: source.rank,
-            source_class: source.source_class.clone(),
+            source_class: source.source_class.to_string(),
             url_or_pointer: source.url_or_pointer.clone(),
             match_confidence: source.match_confidence,
             verified_at: source.verified_at.clone(),
@@ -170,9 +170,9 @@ mod tests {
 
     fn source(game_id: &str, rank: u8, url: &str) -> TapeSource {
         TapeSource {
-            game_id: game_id.to_string(),
+            game_id: nbatv_db::GameId(game_id.to_string()),
             rank,
-            source_class: "test".to_string(),
+            source_class: "test".into(),
             url_or_pointer: url.to_string(),
             match_confidence: 1.0,
             verified_at: "2026-09-07".to_string(),

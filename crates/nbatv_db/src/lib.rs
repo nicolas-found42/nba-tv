@@ -10,7 +10,29 @@
 //! NULLABLE. NULL means "era did not record" and the UI renders "—".
 //! Box score is never unavailable; only tape can be unavailable.
 
+use std::convert::Infallible;
+use std::path::Path;
+use std::str::FromStr;
+
+use rusqlite::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use rusqlite::{Connection, Result as SqlResult, Row};
+
+/// The workspace's one SQLite binding (ADR 0003). `rusqlite` is declared
+/// once in the root `[workspace.dependencies]` and depended on only by this
+/// crate; every other crate names it as `nbatv_db::rusqlite`.
+pub use rusqlite;
+
+/// Open (or create) the archive database file at `path`. This is the only
+/// place outside tests in this crate that opens a connection on disk; it
+/// does not create the schema (see [`create_schema`]).
+pub fn open(path: impl AsRef<Path>) -> SqlResult<Connection> {
+    Connection::open(path)
+}
+
+/// Open a fresh in-memory archive database (no schema; see [`create_schema`]).
+pub fn open_in_memory() -> SqlResult<Connection> {
+    Connection::open_in_memory()
+}
 
 // ---------------------------------------------------------------------------
 // Model types (contract shapes)
@@ -50,6 +72,21 @@ impl std::fmt::Display for GameId {
     }
 }
 
+impl ToSql for GameId {
+    fn to_sql(&self) -> SqlResult<ToSqlOutput<'_>> {
+        self.0.to_sql()
+    }
+}
+
+/// Reading a stored id wraps the text as-is: the database is the record, so
+/// a row with a non-slug `game_id` must load rather than fail the whole
+/// query. Use [`GameId::parse`] to validate untrusted input.
+impl FromSql for GameId {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        String::column_result(value).map(GameId)
+    }
+}
+
 /// Shared shape check: `^\d{9}[A-Z]{3}$`.
 pub fn is_valid_game_id(s: &str) -> bool {
     let b = s.as_bytes();
@@ -74,19 +111,116 @@ impl PlaybackClass {
         match rank {
             1 | 4 => Some(PlaybackClass::ProgressiveFile),
             0 | 2 | 3 => Some(PlaybackClass::ExternalSurface),
-            5 | 6 | 7 => Some(PlaybackClass::Pointer),
+            5..=7 => Some(PlaybackClass::Pointer),
             _ => None,
         }
     }
 }
 
+/// Which kind of place a tape source is: the stored `source_class` text.
+/// The eight known classes are the ladder rung names (`Rung::name()` in
+/// `nbatv_ladder`); the stored column is free `TEXT`, so any other text
+/// (e.g. a hand-entered `fan-rehost`) is kept verbatim in [`Other`] instead
+/// of failing or panicking, and round-trips unchanged.
+///
+/// [`Other`]: SourceClass::Other
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SourceClass {
+    /// `official-nba-free-tier` (rung 0)
+    Official,
+    /// `internet-archive` (rung 1)
+    InternetArchive,
+    /// `youtube` (rung 2)
+    YouTube,
+    /// `non-anglo-rehost-cluster` (rung 3)
+    RehostCluster,
+    /// `standing-empty-corpus` (rung 4)
+    EmptyCorpus,
+    /// `collector-catalogs` (rung 5)
+    Collector,
+    /// `purchase-only` (rung 6)
+    Purchase,
+    /// `institutional` (rung 7)
+    Institutional,
+    /// Any other stored text, preserved exactly.
+    Other(String),
+}
+
+impl SourceClass {
+    /// The exact stored `TEXT` for this class.
+    pub fn as_str(&self) -> &str {
+        match self {
+            SourceClass::Official => "official-nba-free-tier",
+            SourceClass::InternetArchive => "internet-archive",
+            SourceClass::YouTube => "youtube",
+            SourceClass::RehostCluster => "non-anglo-rehost-cluster",
+            SourceClass::EmptyCorpus => "standing-empty-corpus",
+            SourceClass::Collector => "collector-catalogs",
+            SourceClass::Purchase => "purchase-only",
+            SourceClass::Institutional => "institutional",
+            SourceClass::Other(text) => text,
+        }
+    }
+}
+
+impl FromStr for SourceClass {
+    type Err = Infallible;
+
+    /// Total: unknown text becomes [`SourceClass::Other`].
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "official-nba-free-tier" => SourceClass::Official,
+            "internet-archive" => SourceClass::InternetArchive,
+            "youtube" => SourceClass::YouTube,
+            "non-anglo-rehost-cluster" => SourceClass::RehostCluster,
+            "standing-empty-corpus" => SourceClass::EmptyCorpus,
+            "collector-catalogs" => SourceClass::Collector,
+            "purchase-only" => SourceClass::Purchase,
+            "institutional" => SourceClass::Institutional,
+            other => SourceClass::Other(other.to_owned()),
+        })
+    }
+}
+
+impl From<&str> for SourceClass {
+    fn from(s: &str) -> Self {
+        match s.parse() {
+            Ok(class) => class,
+            Err(never) => match never {},
+        }
+    }
+}
+
+impl std::fmt::Display for SourceClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl ToSql for SourceClass {
+    fn to_sql(&self) -> SqlResult<ToSqlOutput<'_>> {
+        self.as_str().to_sql()
+    }
+}
+
+impl FromSql for SourceClass {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        value.as_str().map(SourceClass::from)
+    }
+}
+
 /// One ranked tape-source pointer for a game (grey sources are pointers
 /// only; media is never downloaded by this crate).
+///
+/// `verified_at` stays a `String` (a caller-supplied `YYYY-MM-DD` stamp):
+/// the column is free `TEXT NOT NULL`, callers and fixtures pass other
+/// shapes and empty strings, and a newtype that validated nothing would
+/// only look typed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TapeSource {
-    pub game_id: String,
+    pub game_id: GameId,
     pub rank: u8,
-    pub source_class: String,
+    pub source_class: SourceClass,
     pub url_or_pointer: String,
     pub match_confidence: f32,
     pub verified_at: String,
@@ -106,7 +240,7 @@ impl TapeSource {
 /// (else NULL); REVIEW rows never become `tape_sources`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameQuery {
-    pub game_id: String,
+    pub game_id: GameId,
     pub rung: u8,
     pub query_text: String,
     pub queried_at: String,
@@ -168,9 +302,9 @@ impl std::fmt::Display for CacheState {
 /// `YYYY-MM-DD` verification date, set only on `Ready` rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheEntry {
-    pub game_id: String,
+    pub game_id: GameId,
     pub rank: u8,
-    pub source_class: String,
+    pub source_class: SourceClass,
     pub local_path: String,
     pub bytes: i64,
     pub verified_at: Option<String>,
@@ -1416,9 +1550,9 @@ mod tests {
             insert_tape_source(
                 &conn,
                 &TapeSource {
-                    game_id: "194611010TRH".to_owned(),
+                    game_id: GameId("194611010TRH".to_owned()),
                     rank,
-                    source_class: class.to_owned(),
+                    source_class: class.into(),
                     url_or_pointer: ptr.to_owned(),
                     match_confidence: 0.9,
                     verified_at: "2026-09-07".to_owned(),
@@ -1634,7 +1768,7 @@ mod tests {
             upsert_game_query(
                 &conn,
                 &GameQuery {
-                    game_id: "194611010TRH".to_owned(),
+                    game_id: GameId("194611010TRH".to_owned()),
                     rung,
                     query_text: format!("query for rung {rung}"),
                     queried_at: "2026-01-01".to_owned(),
@@ -1657,7 +1791,7 @@ mod tests {
     fn game_query_upsert_replaces_the_stale_row() {
         let conn = memdb();
         let query = |at: &str, level: &str| GameQuery {
-            game_id: "194611010TRH".to_owned(),
+            game_id: GameId("194611010TRH".to_owned()),
             rung: 1,
             query_text: "ia sweep".to_owned(),
             queried_at: at.to_owned(),
@@ -1679,7 +1813,7 @@ mod tests {
         upsert_game_query(
             &conn,
             &GameQuery {
-                game_id: "194611010TRH".to_owned(),
+                game_id: GameId("194611010TRH".to_owned()),
                 rung: 2,
                 query_text: "youtube sweep".to_owned(),
                 queried_at: "2026-01-01".to_owned(),
@@ -1708,9 +1842,9 @@ mod tests {
     fn tape_source_upsert_refreshes_the_verified_row() {
         let conn = memdb();
         let source = |at: &str| TapeSource {
-            game_id: "194611010TRH".to_owned(),
+            game_id: GameId("194611010TRH".to_owned()),
             rank: 1,
-            source_class: "internet-archive".to_owned(),
+            source_class: SourceClass::InternetArchive,
             url_or_pointer: "https://archive.org/details/194611010TRH".to_owned(),
             match_confidence: 1.0,
             verified_at: at.to_owned(),
@@ -1724,9 +1858,9 @@ mod tests {
 
     fn cache_entry(rank: u8, state: CacheState) -> CacheEntry {
         CacheEntry {
-            game_id: "194611010TRH".to_owned(),
+            game_id: GameId("194611010TRH".to_owned()),
             rank,
-            source_class: "internet-archive".to_owned(),
+            source_class: SourceClass::InternetArchive,
             local_path: "data/cache/tape/1946-47/194611010TRH__NYK-at-TRH__ia.mp4".to_owned(),
             bytes: 714_000_000,
             verified_at: None,
@@ -1918,5 +2052,125 @@ mod tests {
             row.get(0)
         })
         .unwrap()
+    }
+    // -- SourceClass ------------------------------------------------------
+
+    const KNOWN_CLASSES: [(SourceClass, &str); 8] = [
+        (SourceClass::Official, "official-nba-free-tier"),
+        (SourceClass::InternetArchive, "internet-archive"),
+        (SourceClass::YouTube, "youtube"),
+        (SourceClass::RehostCluster, "non-anglo-rehost-cluster"),
+        (SourceClass::EmptyCorpus, "standing-empty-corpus"),
+        (SourceClass::Collector, "collector-catalogs"),
+        (SourceClass::Purchase, "purchase-only"),
+        (SourceClass::Institutional, "institutional"),
+    ];
+
+    #[test]
+    fn source_class_text_round_trips_for_every_known_class() {
+        for (class, text) in KNOWN_CLASSES {
+            assert_eq!(class.as_str(), text);
+            assert_eq!(text.parse::<SourceClass>(), Ok(class.clone()));
+            assert_eq!(class.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn source_class_unknown_text_is_kept_verbatim_never_panics() {
+        for text in ["fan-rehost", "", "YouTube", " youtube", "rung-9", "ünï"] {
+            let class: SourceClass = text.parse().unwrap();
+            assert_eq!(class, SourceClass::Other(text.to_owned()));
+            assert_eq!(class.as_str(), text, "unknown text round-trips exactly");
+        }
+    }
+
+    #[test]
+    fn source_class_stored_text_is_unchanged_and_unknown_rows_load() {
+        let conn = memdb();
+        insert_game(&conn, &first_game()).unwrap();
+        let mut texts: Vec<&str> = KNOWN_CLASSES.iter().map(|(_, t)| *t).collect();
+        texts.push("fan-rehost");
+        texts.push("");
+        for (rank, text) in (0u8..).zip(&texts) {
+            insert_tape_source(
+                &conn,
+                &TapeSource {
+                    game_id: GameId("194611010TRH".to_owned()),
+                    rank,
+                    source_class: (*text).into(),
+                    url_or_pointer: "pointer:x".to_owned(),
+                    match_confidence: 0.5,
+                    verified_at: "2026-09-07".to_owned(),
+                },
+            )
+            .unwrap();
+        }
+        // The column holds exactly the legacy text (schema and data unchanged).
+        let raw: Vec<String> = conn
+            .prepare("SELECT source_class FROM tape_sources ORDER BY rank")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<SqlResult<_>>()
+            .unwrap();
+        assert_eq!(raw, texts);
+        // And reads back typed, unknown text included.
+        let got = tape_sources_for(&conn, "194611010TRH").unwrap();
+        assert_eq!(got.len(), texts.len());
+        assert_eq!(got[1].source_class, SourceClass::InternetArchive);
+        assert_eq!(
+            got[8].source_class,
+            SourceClass::Other("fan-rehost".to_owned())
+        );
+        assert_eq!(got[9].source_class, SourceClass::Other(String::new()));
+    }
+
+    #[test]
+    fn game_id_binds_and_reads_as_its_slug_text() {
+        let conn = memdb();
+        insert_game(&conn, &first_game()).unwrap();
+        let id = GameId::parse("194611010TRH").unwrap();
+        insert_tape_source(
+            &conn,
+            &TapeSource {
+                game_id: id.clone(),
+                rank: 1,
+                source_class: SourceClass::InternetArchive,
+                url_or_pointer: "pointer:x".to_owned(),
+                match_confidence: 1.0,
+                verified_at: "2026-09-07".to_owned(),
+            },
+        )
+        .unwrap();
+        let raw: String = conn
+            .query_row("SELECT game_id FROM tape_sources", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(raw, "194611010TRH");
+        assert_eq!(tape_sources_for(&conn, id.as_str()).unwrap()[0].game_id, id);
+    }
+
+    // -- single SQLite owner (ADR 0003) -----------------------------------
+
+    #[test]
+    fn open_helpers_and_reexport_give_a_working_connection() {
+        // Dependents name the type through `nbatv_db::rusqlite`, not their own dep.
+        let conn: crate::rusqlite::Connection = open_in_memory().unwrap();
+        create_schema(&conn).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM tape_sources", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+
+        let path = std::env::temp_dir().join(format!("nbatv_db_open_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = open(&path).unwrap();
+            create_schema(&conn).unwrap();
+            insert_game(&conn, &first_game()).unwrap();
+        }
+        let conn = open(&path).unwrap();
+        assert!(game_by_id(&conn, "194611010TRH").unwrap().is_some());
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
     }
 }

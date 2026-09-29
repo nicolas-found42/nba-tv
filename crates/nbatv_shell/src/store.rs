@@ -10,6 +10,7 @@ use crate::model::{
     BoxPlayer, BoxScore, BoxTeam, Game, GameType, Season, TapeSource, TapeState, Team,
 };
 use crate::route::Route;
+use nbatv_db::{GameId, SourceClass};
 
 /// Seeded/playable counts for a Season dashboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,9 +101,9 @@ impl FixtureStore {
                     away_pts: 68,
                     tape: TapeState::Playable,
                     sources: vec![TapeSource {
-                        game_id: "194611010TRH".to_string(),
+                        game_id: GameId("194611010TRH".to_string()),
                         rank: 1,
-                        source_class: "internet-archive".to_string(),
+                        source_class: SourceClass::InternetArchive,
                         url_or_pointer: "https://archive.org/details/194611010TRH".to_string(),
                         match_confidence: 0.9,
                         verified_at: "2026-01-01".to_string(),
@@ -119,9 +120,9 @@ impl FixtureStore {
                     away_pts: 49,
                     tape: TapeState::Sweeping,
                     sources: vec![TapeSource {
-                        game_id: "194612070BOS".to_string(),
+                        game_id: GameId("194612070BOS".to_string()),
                         rank: 2,
-                        source_class: "youtube".to_string(),
+                        source_class: SourceClass::YouTube,
                         url_or_pointer: "https://www.youtube.com/watch?v=fixture-sweep".to_string(),
                         match_confidence: 0.4,
                         verified_at: String::new(),
@@ -150,9 +151,9 @@ impl FixtureStore {
                     away_pts: 65,
                     tape: TapeState::Pointer,
                     sources: vec![TapeSource {
-                        game_id: "194711150BOS".to_string(),
+                        game_id: GameId("194711150BOS".to_string()),
                         rank: 6,
-                        source_class: "purchase-only".to_string(),
+                        source_class: SourceClass::Purchase,
                         url_or_pointer: "Catalog ref FTE-194711150BOS (pointer only)".to_string(),
                         match_confidence: 1.0,
                         verified_at: "2026-02-01".to_string(),

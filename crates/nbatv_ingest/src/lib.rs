@@ -2746,11 +2746,11 @@ mod fetch_tests {
 // Snapshot ingest: `data/raw/br` -> the archive db
 // ---------------------------------------------------------------------------
 
+use nbatv_db::rusqlite::Connection;
 use nbatv_db::{
     insert_box_player, insert_box_team, insert_season, insert_season_total, upsert_game,
     upsert_team, BoxPlayerRow, BoxTeamRow, GameRow, SeasonRow, SeasonTotalRow, TeamRow,
 };
-use rusqlite::Connection;
 
 /// One run of the snapshot builder. State counters (`seasons`..`games_*`)
 /// describe what the archive holds after the run and are stable across
@@ -2789,7 +2789,7 @@ pub struct IngestReport {
 #[derive(Debug)]
 pub enum IngestError {
     Io(std::io::Error),
-    Db(rusqlite::Error),
+    Db(nbatv_db::rusqlite::Error),
     /// A snapshot failed the gzip/UTF-8 decode the crawl format guarantees.
     Snapshot(String),
 }
@@ -2820,8 +2820,8 @@ impl From<std::io::Error> for IngestError {
     }
 }
 
-impl From<rusqlite::Error> for IngestError {
-    fn from(e: rusqlite::Error) -> Self {
+impl From<nbatv_db::rusqlite::Error> for IngestError {
+    fn from(e: nbatv_db::rusqlite::Error) -> Self {
         IngestError::Db(e)
     }
 }
@@ -3054,7 +3054,7 @@ fn ingest_season_dir(
 
     let season_known: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM seasons WHERE league = ?1 AND year = ?2)",
-        rusqlite::params![league, year],
+        nbatv_db::rusqlite::params![league, year],
         |row| row.get(0),
     )?;
     if !season_known {
@@ -3096,12 +3096,12 @@ fn ingest_season_dir(
                 let prior: Option<(i32, i32)> = tx
                     .query_row(
                         "SELECT home_pts, away_pts FROM games WHERE game_id = ?1",
-                        rusqlite::params![game_id],
+                        nbatv_db::rusqlite::params![game_id],
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )
                     .map(Some)
                     .or_else(|e| {
-                        if e == rusqlite::Error::QueryReturnedNoRows {
+                        if e == nbatv_db::rusqlite::Error::QueryReturnedNoRows {
                             Ok(None)
                         } else {
                             Err(e)
@@ -3116,7 +3116,7 @@ fn ingest_season_dir(
                 }
                 let has_box: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM box_team WHERE game_id = ?1)",
-                    rusqlite::params![game_id],
+                    nbatv_db::rusqlite::params![game_id],
                     |r| r.get(0),
                 )?;
                 if !has_box {
@@ -3157,7 +3157,7 @@ fn ingest_season_dir(
             let known: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM player_season_totals \
                  WHERE player_br = ?1 AND season = ?2 AND team_br = ?3)",
-                rusqlite::params![total.player_br, total.season, total.team_br],
+                nbatv_db::rusqlite::params![total.player_br, total.season, total.team_br],
                 |row| row.get(0),
             )?;
             if known {

@@ -23,12 +23,12 @@
 use crate::politeness::PolitenessConfig;
 use crate::probe::{GameContext, ProbeRegistry};
 use crate::scorer::{confidence_for, level_to_str, parse_level, score_candidate};
-use nbatv_db::{GameQuery, TapeSource};
+use nbatv_db::rusqlite::{Connection, Result as SqlResult};
+use nbatv_db::{GameId, GameQuery, TapeSource};
 use nbatv_ladder::exhaustion::{
     evaluate_sweep, MatchLevel, RecordedQuery, RungEvaluation, SweepStatus,
 };
 use nbatv_ladder::{Rung, YoutubeQuota};
-use rusqlite::{Connection, Result as SqlResult};
 
 /// What one sweep did: the derived verdict, the rungs actually probed
 /// (fresh-window skips are absent), and the rungs that deferred — a
@@ -47,7 +47,7 @@ pub enum SweepError {
     /// `now` is not a `YYYY-MM-DD`(-prefixed) date.
     BadNow(String),
     /// SQLite failure.
-    Db(rusqlite::Error),
+    Db(nbatv_db::rusqlite::Error),
 }
 
 impl std::fmt::Display for SweepError {
@@ -68,8 +68,8 @@ impl std::error::Error for SweepError {
     }
 }
 
-impl From<rusqlite::Error> for SweepError {
-    fn from(err: rusqlite::Error) -> Self {
+impl From<nbatv_db::rusqlite::Error> for SweepError {
+    fn from(err: nbatv_db::rusqlite::Error) -> Self {
         SweepError::Db(err)
     }
 }
@@ -183,7 +183,7 @@ pub fn sweep_game(
             (None, None)
         };
         let row = GameQuery {
-            game_id: game.game_id.clone(),
+            game_id: GameId(game.game_id.clone()),
             rung,
             query_text: outcome.query_text.clone(),
             queried_at: now.to_owned(),
@@ -202,9 +202,9 @@ pub fn sweep_game(
             nbatv_db::upsert_tape_source(
                 conn,
                 &TapeSource {
-                    game_id: game.game_id.clone(),
+                    game_id: GameId(game.game_id.clone()),
                     rank: rung,
-                    source_class: rung_name(rung),
+                    source_class: rung_name(rung).as_str().into(),
                     url_or_pointer: winner.url_or_pointer.clone(),
                     match_confidence: confidence_for(best),
                     verified_at: now.to_owned(),
@@ -325,7 +325,7 @@ fn cached_or_missing(game_id: &str, cached: Option<&GameQuery>, rung: u8) -> Run
 
 fn review_item(row: GameQuery) -> ReviewItem {
     ReviewItem {
-        game_id: row.game_id,
+        game_id: row.game_id.0,
         rung: row.rung,
         rung_name: rung_name(row.rung),
         url_or_pointer: row.review_url.unwrap_or_default(),

@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn sweep_of_a_finals_game_writes_a_rung0_tape_row() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = nbatv_db::open_in_memory().unwrap();
         nbatv_db::create_schema(&conn).unwrap();
         let g = game("UTA", "CHI", "1998-06-14");
         let probe = NbaProbe::new();
@@ -711,7 +711,7 @@ mod tests {
         let tapes = nbatv_db::tape_sources_for(&conn, &g.game_id).unwrap();
         assert_eq!(tapes.len(), 1);
         assert_eq!(tapes[0].rank, 0);
-        assert_eq!(tapes[0].source_class, "official-nba-free-tier");
+        assert_eq!(tapes[0].source_class, nbatv_db::SourceClass::Official);
         assert_eq!(tapes[0].url_or_pointer, NBA_WATCH_URL);
         let queries = nbatv_db::game_queries_for(&conn, &g.game_id).unwrap();
         assert_eq!(queries.len(), 1);

@@ -19,8 +19,8 @@
 //! timestamp. Everything is offline by construction — the suite links no
 //! network implementation.
 
-use nbatv_db::{upsert_cache_entry, CacheEntry, CacheState};
-use rusqlite::Connection;
+use nbatv_db::rusqlite::Connection;
+use nbatv_db::{upsert_cache_entry, CacheEntry, CacheState, GameId, SourceClass};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -114,9 +114,9 @@ pub fn src_tag_for_url(url: &str) -> &'static str {
 /// at least one attempt always runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchSpec {
-    pub game_id: String,
+    pub game_id: GameId,
     pub rank: u8,
-    pub source_class: String,
+    pub source_class: SourceClass,
     pub url: String,
     pub dest: PathBuf,
     pub max_retries: u32,
@@ -567,7 +567,7 @@ pub fn fetch_to_cache(
     fetcher: &dyn TapeFetcher,
     probe: &dyn DurationProbe,
     verified_at: &str,
-) -> Result<CacheFetchReport, rusqlite::Error> {
+) -> Result<CacheFetchReport, nbatv_db::rusqlite::Error> {
     let row = |state: CacheState, bytes: i64, verified: Option<String>| CacheEntry {
         game_id: spec.game_id.clone(),
         rank: spec.rank,
@@ -627,9 +627,9 @@ mod tests {
 
     fn spec_in(dir: &Path, max_retries: u32) -> FetchSpec {
         FetchSpec {
-            game_id: "194611010TRH".to_owned(),
+            game_id: GameId("194611010TRH".to_owned()),
             rank: 1,
-            source_class: "internet-archive".to_owned(),
+            source_class: nbatv_db::SourceClass::InternetArchive,
             url: "https://archive.org/download/194611010TRH/game.mp4".to_owned(),
             dest: dir.join("tape/1946-47/194611010TRH__NYK-at-TRH__ia.mp4"),
             max_retries,
@@ -637,7 +637,7 @@ mod tests {
     }
 
     fn memdb() -> Connection {
-        let conn = Connection::open_in_memory().expect("in-memory db");
+        let conn = nbatv_db::open_in_memory().expect("in-memory db");
         nbatv_db::create_schema(&conn).expect("create_schema");
         conn
     }

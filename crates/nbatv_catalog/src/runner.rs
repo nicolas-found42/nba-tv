@@ -87,8 +87,8 @@ use crate::fetch::{
 use crate::politeness::PolitenessConfig;
 use crate::probe::ProbeRegistry;
 use crate::sweep::{game_context_for, sweep_game};
+use nbatv_db::rusqlite::Connection;
 use nbatv_db::PlaybackClass;
-use rusqlite::Connection;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -234,7 +234,7 @@ impl BackfillReport {
 pub enum RunnerError {
     BadSeason(String),
     BadNow(String),
-    Db(rusqlite::Error),
+    Db(nbatv_db::rusqlite::Error),
     Mirror(MirrorError),
 }
 
@@ -259,8 +259,8 @@ impl std::error::Error for RunnerError {
     }
 }
 
-impl From<rusqlite::Error> for RunnerError {
-    fn from(err: rusqlite::Error) -> Self {
+impl From<nbatv_db::rusqlite::Error> for RunnerError {
+    fn from(err: nbatv_db::rusqlite::Error) -> Self {
         RunnerError::Db(err)
     }
 }
@@ -357,7 +357,7 @@ pub fn run_backfill(
                 "mp4",
             );
             let spec = FetchSpec {
-                game_id: row.game_id.clone(),
+                game_id: nbatv_db::GameId(row.game_id.clone()),
                 rank: tape.rank,
                 source_class: tape.source_class.clone(),
                 url: tape.url_or_pointer.clone(),

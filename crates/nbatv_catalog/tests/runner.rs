@@ -13,8 +13,8 @@ use nbatv_catalog::{
     ProbeOutcome, ProbeRegistry, RcloneMirror, RcloneOutput, ScriptStep, ScriptedDuration,
     ScriptedFetcher, ScriptedProbe,
 };
+use nbatv_db::rusqlite::Connection;
 use nbatv_db::{CacheState, GameRow, TapeSource};
-use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -22,7 +22,7 @@ use std::time::Duration;
 const NOW: &str = "2026-09-08";
 
 fn memdb() -> Connection {
-    let conn = Connection::open_in_memory().expect("in-memory db");
+    let conn = nbatv_db::open_in_memory().expect("in-memory db");
     nbatv_db::create_schema(&conn).expect("create_schema");
     conn
 }
@@ -452,9 +452,9 @@ fn ready_rows_are_not_refetched_but_failed_rows_retry() {
         nbatv_db::upsert_cache_entry(
             &conn,
             &nbatv_db::CacheEntry {
-                game_id: id.to_owned(),
+                game_id: nbatv_db::GameId(id.to_owned()),
                 rank: 1,
-                source_class: "internet-archive".to_owned(),
+                source_class: nbatv_db::SourceClass::InternetArchive,
                 local_path: dest.to_string_lossy().into_owned(),
                 bytes: 64,
                 verified_at: (state == CacheState::Ready).then(|| NOW.to_owned()),
@@ -734,9 +734,9 @@ fn non_byte_class_tape_rows_are_never_fetched() {
     // stage must ignore it entirely, whatever its state claims.
     let conn = seeded_two_seasons();
     let mut external = TapeSource {
-        game_id: "194611010TRH".to_owned(),
+        game_id: nbatv_db::GameId("194611010TRH".to_owned()),
         rank: 0,
-        source_class: "official-nba-free-tier".to_owned(),
+        source_class: nbatv_db::SourceClass::Official,
         url_or_pointer: "https://www.nba.com/watch/featured".to_owned(),
         match_confidence: 1.0,
         verified_at: "2026-09-08".to_owned(),

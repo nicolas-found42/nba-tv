@@ -5,13 +5,13 @@
 //! - An empty db degrades honestly: empty season list, no crash,
 //!   Play on a missing game resolves to Unavailable.
 
+use nbatv_db::rusqlite::Connection;
 use nbatv_db::{
     create_schema, insert_box_player, insert_box_team, insert_game, insert_player, insert_season,
     insert_tape_source, insert_team, BoxPlayerRow, BoxTeamRow, GameRow, PlayerRow, SeasonRow,
     TapeSource, TeamRow,
 };
 use nbatv_shell::{PlayDispatch, ShellApp, TapeState};
-use rusqlite::Connection;
 
 const GAME_ID: &str = "194611010TRH";
 const RANK1_URL: &str = "https://archive.org/details/194611010TRH";
@@ -21,7 +21,7 @@ const RANK3_POINTER: &str = "pointer:fan-cluster/194611010TRH";
 /// Score rows, and two tape rows inserted worst-rank-first (insertion order
 /// must not decide dispatch — ascending rank must).
 fn seeded_conn() -> Connection {
-    let conn = Connection::open_in_memory().expect("in-memory archive db");
+    let conn = nbatv_db::open_in_memory().expect("in-memory archive db");
     create_schema(&conn).expect("create_schema");
 
     insert_season(
@@ -198,9 +198,9 @@ fn seeded_conn() -> Connection {
     insert_tape_source(
         &conn,
         &TapeSource {
-            game_id: GAME_ID.to_owned(),
+            game_id: nbatv_db::GameId(GAME_ID.to_owned()),
             rank: 3,
-            source_class: "fan-rehost".to_owned(),
+            source_class: "fan-rehost".into(),
             url_or_pointer: RANK3_POINTER.to_owned(),
             match_confidence: 0.4,
             verified_at: "2026-01-02".to_owned(),
@@ -210,9 +210,9 @@ fn seeded_conn() -> Connection {
     insert_tape_source(
         &conn,
         &TapeSource {
-            game_id: GAME_ID.to_owned(),
+            game_id: nbatv_db::GameId(GAME_ID.to_owned()),
             rank: 1,
-            source_class: "internet-archive".to_owned(),
+            source_class: nbatv_db::SourceClass::InternetArchive,
             url_or_pointer: RANK1_URL.to_owned(),
             match_confidence: 0.9,
             verified_at: "2026-01-01".to_owned(),
@@ -295,7 +295,7 @@ fn press_play_resolves_through_the_rank_1_tape_row() {
 
 #[test]
 fn empty_db_degrades_honestly() {
-    let conn = Connection::open_in_memory().expect("in-memory db");
+    let conn = nbatv_db::open_in_memory().expect("in-memory db");
     create_schema(&conn).expect("create_schema");
     let mut app = ShellApp::from_connection(conn);
 

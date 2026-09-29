@@ -5,6 +5,6 @@ edition = "2021"
 description = "SQLite storage for the nba-tv personal NBA archive"
 
 [dependencies]
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { workspace = true }
 [lints]
 workspace = true

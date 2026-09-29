@@ -18,9 +18,9 @@ use nbatv_catalog::{
     registry_with_ytdlp, sweep_game, GameContext, PolitenessConfig, ProbeRegistry, SourceProbe,
     YtdlpProbe,
 };
+use nbatv_db::rusqlite::Connection;
 use nbatv_db::{create_schema, game_queries_for, insert_game, tape_sources_for, GameRow};
 use nbatv_ladder::YoutubeQuota;
-use rusqlite::Connection;
 use std::time::Duration;
 
 mod common;
@@ -277,7 +277,7 @@ fn sweep_end_to_end_writes_rung_2_embed_class_row() {
     let tapes = tape_sources_for(&conn, GAME_ID).expect("tapes");
     assert_eq!(tapes.len(), 1);
     assert_eq!(tapes[0].rank, 2, "rung 2 is the embed-class ladder rung");
-    assert_eq!(tapes[0].source_class, "youtube");
+    assert_eq!(tapes[0].source_class, nbatv_db::SourceClass::YouTube);
     assert_eq!(
         tapes[0].url_or_pointer, "https://www.youtube.com/watch?v=ABCDEFGHIJK",
         "watch URL: the shell converts to the sanctioned /embed/ player"
