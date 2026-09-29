@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn full_empty_sweep_with_recorded_rung4_is_honest_unavailable() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = nbatv_db::open_in_memory().unwrap();
         nbatv_db::create_schema(&conn).unwrap();
         let g = game();
         let nba = crate::nba_probe::NbaProbe::new();

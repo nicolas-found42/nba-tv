@@ -51,22 +51,22 @@ pub const ARCHIVE_DB_PATH: &str = "data/archive.db";
 
 /// The live catalog: a SQLite archive connection the Shell renders through.
 pub struct DbStore {
-    conn: rusqlite::Connection,
+    conn: nbatv_db::rusqlite::Connection,
 }
 
 impl DbStore {
     /// Open (creating) the archive file at `path` and ensure the schema,
     /// so an empty file is valid. Fails without touching anything else —
     /// callers fall back to an empty in-memory archive.
-    pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
-        let conn = rusqlite::Connection::open(path)?;
+    pub fn open(path: impl AsRef<Path>) -> nbatv_db::rusqlite::Result<Self> {
+        let conn = nbatv_db::open(path)?;
         nbatv_db::create_schema(&conn)?;
         Ok(Self { conn })
     }
 
     /// Hermetic empty archive: no filesystem. Pure-logic tests use this.
     pub fn in_memory() -> Self {
-        let conn = rusqlite::Connection::open_in_memory().expect("in-memory archive db must open");
+        let conn = nbatv_db::open_in_memory().expect("in-memory archive db must open");
         if let Err(err) = nbatv_db::create_schema(&conn) {
             eprintln!("archive db: schema setup failed on in-memory db ({err})");
         }
@@ -76,7 +76,7 @@ impl DbStore {
     /// Take ownership of an already-opened connection (headless db tests
     /// seed it first). The schema is ensured idempotently; failures log
     /// once and queries then degrade to empty.
-    pub fn from_connection(conn: rusqlite::Connection) -> Self {
+    pub fn from_connection(conn: nbatv_db::rusqlite::Connection) -> Self {
         if let Err(err) = nbatv_db::create_schema(&conn) {
             eprintln!("archive db: schema setup failed ({err})");
         }
@@ -152,7 +152,7 @@ impl DbStore {
             .ok()
             .flatten()
             .map(|row| HandoverCacheEntry {
-                game_id: row.game_id,
+                game_id: row.game_id.0,
                 location: row.local_path,
             })
     }
@@ -619,7 +619,7 @@ fn display_label(db_label: &str) -> String {
 /// nothing to play. One tape_sources read plus one game_queries read per
 /// game: the rows are preloaded once and the verdict derived from them.
 fn tape_state_for_game(
-    conn: &rusqlite::Connection,
+    conn: &nbatv_db::rusqlite::Connection,
     game_id: &str,
     sources: &[TapeSource],
 ) -> TapeState {
@@ -750,17 +750,17 @@ mod tests {
         assert_eq!(season_year("nope"), None);
     }
 
-    fn memdb() -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open_in_memory().expect("in-memory archive db");
+    fn memdb() -> nbatv_db::rusqlite::Connection {
+        let conn = nbatv_db::open_in_memory().expect("in-memory archive db");
         nbatv_db::create_schema(&conn).expect("create_schema");
         conn
     }
 
     fn stream_source(rank: u8) -> TapeSource {
         TapeSource {
-            game_id: "194611010TRH".to_owned(),
+            game_id: nbatv_db::GameId("194611010TRH".to_owned()),
             rank,
-            source_class: "internet-archive".to_owned(),
+            source_class: nbatv_db::SourceClass::InternetArchive,
             url_or_pointer: "https://archive.org/details/x".to_owned(),
             match_confidence: 1.0,
             verified_at: "2026-01-01".to_owned(),
@@ -769,7 +769,7 @@ mod tests {
 
     fn sweep_query(rung: u8, level: &str) -> nbatv_db::GameQuery {
         nbatv_db::GameQuery {
-            game_id: "194611010TRH".to_owned(),
+            game_id: nbatv_db::GameId("194611010TRH".to_owned()),
             rung,
             query_text: format!("query for rung {rung}"),
             queried_at: "2026-01-01".to_owned(),
@@ -822,9 +822,9 @@ mod tests {
         nbatv_db::insert_tape_source(
             &conn,
             &nbatv_db::TapeSource {
-                game_id: "194611010TRH".to_owned(),
+                game_id: nbatv_db::GameId("194611010TRH".to_owned()),
                 rank: 5,
-                source_class: "collector-catalogs".to_owned(),
+                source_class: nbatv_db::SourceClass::Collector,
                 url_or_pointer: "pointer:collector/x".to_owned(),
                 match_confidence: 1.0,
                 verified_at: "2026-01-01".to_owned(),
@@ -857,9 +857,9 @@ mod tests {
 
     fn cache_row(state: nbatv_db::CacheState) -> nbatv_db::CacheEntry {
         nbatv_db::CacheEntry {
-            game_id: "194611010TRH".to_owned(),
+            game_id: nbatv_db::GameId("194611010TRH".to_owned()),
             rank: 1,
-            source_class: "internet-archive".to_owned(),
+            source_class: nbatv_db::SourceClass::InternetArchive,
             local_path: "data/cache/tape/1946-47/194611010TRH__NYK-at-TRH__ia.mp4".to_owned(),
             bytes: 100,
             verified_at: None,
@@ -929,7 +929,7 @@ mod tests {
         let mut ready = cache_row(nbatv_db::CacheState::Ready);
         nbatv_db::upsert_cache_entry(&conn, &ready).unwrap();
         ready.rank = 4;
-        ready.game_id = "194611020CHS".to_owned();
+        ready.game_id = nbatv_db::GameId("194611020CHS".to_owned());
         nbatv_db::upsert_cache_entry(&conn, &ready).unwrap();
         let store = DbStore::from_connection(conn);
         let line = store

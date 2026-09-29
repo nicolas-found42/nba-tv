@@ -6,7 +6,6 @@ description = "Bootstrap ingest for the nba-tv personal NBA archive (FTE CSV, va
 
 [dependencies]
 nbatv_db = { path = "../nbatv_db" }
-rusqlite = { version = "0.32", features = ["bundled"] }
 
 [lints]
 workspace = true

@@ -16,6 +16,11 @@ members = [
 edition = "2021"
 rust-version = "1.85"
 
+[workspace.dependencies]
+# SQLite is declared once here; only `nbatv_db` depends on it and re-exports it
+# (ADR 0003). Every other crate reaches it through `nbatv_db::rusqlite`.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 [workspace.lints.rust]
 unreachable_pub = "warn"
 

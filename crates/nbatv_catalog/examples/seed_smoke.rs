@@ -20,7 +20,6 @@
 
 use nbatv_catalog::GameContext;
 use nbatv_db::{create_schema, insert_game, GameRow};
-use rusqlite::Connection;
 
 fn game(season: i32, game_id: &str, date: &str, home: &str, away: &str) -> GameRow {
     GameRow {
@@ -51,7 +50,7 @@ fn main() {
         eprintln!("usage: seed_smoke <archive.db>");
         std::process::exit(2);
     };
-    let conn = Connection::open(&db_path).expect("open archive db");
+    let conn = nbatv_db::open(&db_path).expect("open archive db");
     create_schema(&conn).expect("create_schema");
     insert_game(
         &conn,

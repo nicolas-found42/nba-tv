@@ -8,9 +8,9 @@ use nbatv_catalog::{
     game_context_for, review_list, sweep_game, sweep_status_for, GameContext, PolitenessConfig,
     ProbeCandidate, ProbeOutcome, ProbeRegistry, ScriptedProbe, SourceProbe, SweepStatus,
 };
+use nbatv_db::rusqlite::Connection;
 use nbatv_db::{create_schema, insert_game, GameRow};
 use nbatv_ladder::YoutubeQuota;
-use rusqlite::Connection;
 use std::time::Duration;
 
 const GAME_ID: &str = "194611010TRH";
@@ -37,7 +37,7 @@ fn game_row() -> GameRow {
 }
 
 fn seeded_conn() -> Connection {
-    let conn = Connection::open_in_memory().expect("in-memory archive db");
+    let conn = nbatv_db::open_in_memory().expect("in-memory archive db");
     create_schema(&conn).expect("create_schema");
     insert_game(&conn, &game_row()).unwrap();
     conn
@@ -196,7 +196,10 @@ fn confirmed_flows_to_tape_with_full_confidence() {
     let tapes = nbatv_db::tape_sources_for(&conn, GAME_ID).unwrap();
     assert_eq!(tapes.len(), 1);
     assert_eq!(tapes[0].rank, 1);
-    assert_eq!(tapes[0].source_class, "internet-archive");
+    assert_eq!(
+        tapes[0].source_class,
+        nbatv_db::SourceClass::InternetArchive
+    );
     assert_eq!(tapes[0].match_confidence, 1.0);
     assert_eq!(tapes[0].verified_at, T0);
 }
@@ -312,9 +315,9 @@ fn verified_tape_row_and_cache_entry_survive_a_later_failed_search() {
     nbatv_db::upsert_cache_entry(
         &conn,
         &nbatv_db::CacheEntry {
-            game_id: GAME_ID.to_owned(),
+            game_id: nbatv_db::GameId(GAME_ID.to_owned()),
             rank: 0,
-            source_class: "catalog".to_owned(),
+            source_class: "catalog".into(),
             local_path: "tape/194611010TRH.mp4".to_owned(),
             bytes: 123,
             verified_at: Some(T0.to_owned()),
@@ -354,7 +357,7 @@ fn queries_survive_restart_and_resume_without_reprobing() {
     ));
     let _ = std::fs::remove_file(&path);
     {
-        let conn = Connection::open(&path).expect("open archive file");
+        let conn = nbatv_db::open(&path).expect("open archive file");
         create_schema(&conn).expect("create_schema");
         insert_game(&conn, &game_row()).unwrap();
         let (p0, p1, p2, p3, p4) = reject_probes();
@@ -363,7 +366,7 @@ fn queries_survive_restart_and_resume_without_reprobing() {
     }
     // "Restart": a fresh connection to the same file, no probes registered.
     {
-        let conn = Connection::open(&path).expect("reopen archive file");
+        let conn = nbatv_db::open(&path).expect("reopen archive file");
         let queries = nbatv_db::game_queries_for(&conn, GAME_ID).unwrap();
         assert_eq!(queries.len(), 5, "game_queries rows survive restart");
         let empty = ProbeRegistry::new();
@@ -386,9 +389,9 @@ fn pointers_only_means_exists_not_streamable() {
     nbatv_db::insert_tape_source(
         &conn,
         &nbatv_db::TapeSource {
-            game_id: GAME_ID.to_owned(),
+            game_id: nbatv_db::GameId(GAME_ID.to_owned()),
             rank: 5,
-            source_class: "collector-catalogs".to_owned(),
+            source_class: nbatv_db::SourceClass::Collector,
             url_or_pointer: "pointer:collector/194611010TRH".to_owned(),
             match_confidence: 1.0,
             verified_at: T0.to_owned(),

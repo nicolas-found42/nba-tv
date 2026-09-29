@@ -2562,7 +2562,6 @@ dependencies = [
  "nbatv_db",
  "nbatv_ladder",
  "parking_lot",
- "rusqlite",
 ]
 
 [[package]]
@@ -2577,7 +2576,6 @@ name = "nbatv_ingest"
 version = "0.1.0"
 dependencies = [
  "nbatv_db",
- "rusqlite",
 ]
 
 [[package]]
@@ -2600,7 +2598,6 @@ dependencies = [
  "nbatv_db",
  "nbatv_player",
  "raw-window-handle",
- "rusqlite",
  "wry",
 ]
 

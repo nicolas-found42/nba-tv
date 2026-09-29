@@ -52,7 +52,7 @@ fn run(
                 .map_err(|err| format!("cannot create archive dir {}: {err}", parent.display()))?;
         }
     }
-    let conn = rusqlite::Connection::open(db_path)
+    let conn = nbatv_db::open(db_path)
         .map_err(|err| format!("cannot open archive {}: {err}", db_path.display()))?;
     nbatv_db::create_schema(&conn).map_err(|err| format!("cannot create schema: {err}"))?;
 

@@ -8,7 +8,6 @@ license = "MIT"
 [dependencies]
 nbatv_db = { path = "../nbatv_db", version = "0.1.0" }
 nbatv_ladder = { path = "../nbatv_ladder", version = "0.1.0" }
-rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 parking_lot = "0.12"

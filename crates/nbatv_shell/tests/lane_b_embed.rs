@@ -22,6 +22,7 @@
 //! player, resize behavior, sign-in click-through, refusal rendering.
 //! Those need a human at the window; the headless tests here pin the
 //! dispatch/card behavior around them.
+use nbatv_db::rusqlite::Connection;
 use nbatv_db::{
     create_schema, insert_game, insert_season, insert_tape_source, insert_team, GameRow, SeasonRow,
     TapeSource, TeamRow,
@@ -29,7 +30,6 @@ use nbatv_db::{
 use nbatv_shell::{
     is_sign_in_url, EmbedSession, LaneBStatus, PlayDispatch, ShellApp, WEBVIEW_PROFILE_DIR,
 };
-use rusqlite::Connection;
 
 const GAME_ID: &str = "196901010BOS";
 const WATCH_URL: &str = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
@@ -39,7 +39,7 @@ const EMBED_URL: &str = "https://www.youtube.com/embed/dQw4w9WgXcQ?enablejsapi=1
 /// watch URL (valid 11-char id): dispatch must resolve it to the sanctioned
 /// `/embed/` player, never the `/watch` page.
 fn seeded_embed_conn() -> Connection {
-    let conn = Connection::open_in_memory().expect("in-memory archive db");
+    let conn = nbatv_db::open_in_memory().expect("in-memory archive db");
     create_schema(&conn).expect("create_schema");
     insert_season(
         &conn,
@@ -90,9 +90,9 @@ fn seeded_embed_conn() -> Connection {
     insert_tape_source(
         &conn,
         &TapeSource {
-            game_id: GAME_ID.to_owned(),
+            game_id: nbatv_db::GameId(GAME_ID.to_owned()),
             rank: 2,
-            source_class: "youtube".to_owned(),
+            source_class: nbatv_db::SourceClass::YouTube,
             url_or_pointer: WATCH_URL.to_owned(),
             match_confidence: 0.8,
             verified_at: "2026-09-01".to_owned(),

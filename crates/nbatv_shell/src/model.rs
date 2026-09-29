@@ -11,6 +11,8 @@
 
 use std::fmt::Display;
 
+use nbatv_db::{GameId, SourceClass};
+
 /// Format one Box Score cell: a recorded value, or `—` when the era did
 /// not record it (`None`). Never invent a zero for unrecorded data.
 pub fn cell<T: Display>(value: Option<T>) -> String {
@@ -94,9 +96,9 @@ pub fn playback_class_for_rank(rank: u8) -> Option<PlaybackClass> {
 /// this struct never triggers a download.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TapeSource {
-    pub game_id: String,
+    pub game_id: GameId,
     pub rank: u8,
-    pub source_class: String,
+    pub source_class: SourceClass,
     pub url_or_pointer: String,
     pub match_confidence: f32,
     pub verified_at: String,

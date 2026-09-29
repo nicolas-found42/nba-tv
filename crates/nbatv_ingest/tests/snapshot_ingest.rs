@@ -5,8 +5,8 @@
 //! real `nbatv_db` writers, and a second run over the same dir must be a
 //! no-op (resume), not a duplicate pass.
 
+use nbatv_db::rusqlite::Connection;
 use nbatv_ingest::{ingest_snapshot_dir, parse_games_page, parse_totals_page};
-use rusqlite::Connection;
 use std::path::Path;
 
 /// Same shape as the e2e fixture: three rows — the played opener (box file
@@ -120,7 +120,7 @@ fn count(conn: &Connection, table: &str) -> i64 {
 
 #[test]
 fn snapshot_crawl_fills_the_archive_and_reingest_is_a_noop() {
-    let conn = Connection::open_in_memory().expect("in-memory db");
+    let conn = nbatv_db::open_in_memory().expect("in-memory db");
     let crawl = fixture_crawl("seam");
 
     let first = ingest_snapshot_dir(&conn, crawl.path()).expect("first ingest");
@@ -230,7 +230,7 @@ fn snapshot_crawl_fills_the_archive_and_reingest_is_a_noop() {
 
 #[test]
 fn orphan_box_page_is_counted_and_ignored() {
-    let conn = Connection::open_in_memory().expect("in-memory db");
+    let conn = nbatv_db::open_in_memory().expect("in-memory db");
     let crawl = fixture_crawl("orphan");
     // A valid-looking snapshot with no schedule row: the schedule is the
     // authority, so the page counts as skipped and inserts nothing.
