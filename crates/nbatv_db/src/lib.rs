@@ -847,22 +847,6 @@ pub fn upsert_tape_source(conn: &Connection, t: &TapeSource) -> SqlResult<()> {
     Ok(())
 }
 
-/// Remove a tape source and its rank-matched cache record when a completed
-/// resweep no longer verifies that source. The local cache file is left in
-/// place; only its now-untrusted database pointer is invalidated.
-pub fn invalidate_tape_source(conn: &Connection, game_id: &str, rank: u8) -> SqlResult<()> {
-    let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "DELETE FROM cache_entries WHERE game_id = ?1 AND rank = ?2",
-        rusqlite::params![game_id, rank],
-    )?;
-    tx.execute(
-        "DELETE FROM tape_sources WHERE game_id = ?1 AND rank = ?2",
-        rusqlite::params![game_id, rank],
-    )?;
-    tx.commit()
-}
-
 // ---------------------------------------------------------------------------
 // Cache Tier entries (issue #25)
 // ---------------------------------------------------------------------------

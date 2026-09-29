@@ -33,17 +33,14 @@
 //! Use `--from`/`--to` to run it in waves; every wave resumes where the
 //! last stopped.
 
-use nbatv_catalog::{DirectHttpJev, JevJudge};
 use nbatv_ingest::crawl::{
-    crawl_season_with_jev, pending_jobs, season_slug, SeasonCrawl, FIRST_SEASON,
-    LAST_COMPLETED_SEASON,
+    crawl_season, pending_jobs, season_slug, SeasonCrawl, FIRST_SEASON, LAST_COMPLETED_SEASON,
 };
 use nbatv_ingest::{raw_snapshot_path, FetchClient, FetchError};
 use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
-use std::sync::Arc;
 use std::time::Duration;
 
 const EXIT_OK: u8 = 0;
@@ -163,10 +160,10 @@ fn parse_argv(argv: &[String]) -> Result<Args, String> {
     Ok(args)
 }
 
-/// Live [`FetchClient`]: `curl -sS --fail-with-body -L` with the archive
-/// contact UA, page body on stdout, and the HTTP status appended via `-w`.
-/// `--fail-with-body` preserves 403/5xx evidence; `--max-filesize` bounds
-/// the captured body before `Command::output()` buffers it.
+/// Live [`FetchClient`]: `curl -sS --fail -L` with the archive contact UA,
+/// page body on stdout and the HTTP status appended via `-w` so 404s can be
+/// told apart from transport failures. `--max-filesize` bounds the captured
+/// body before `Command::output()` buffers it.
 struct CurlClient {
     curl_bin: String,
     user_agent: String,
@@ -188,7 +185,7 @@ const CURL_MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 fn curl_command(curl_bin: &str, user_agent: &str, max_time_secs: u64, url: &str) -> Command {
     let mut command = Command::new(curl_bin);
     command
-        .args(["-sS", "--fail-with-body", "-L"])
+        .args(["-sS", "--fail", "-L"])
         .arg("--max-time")
         .arg(max_time_secs.to_string())
         .arg("--max-filesize")
@@ -213,10 +210,9 @@ impl FetchClient for CurlClient {
 }
 
 /// curl's output (page body + trailing `-w` status line) → page text.
-/// Exact 404/410 and 429/503 handling preempts the optional classifier.
-/// Other access/policy responses and 5xx responses retain bounded body
-/// evidence in [`FetchError::Unclassified`]; transport failures stay typed
-/// as [`FetchError::Client`].
+/// Status 404/410 is [`FetchError::NotFound`]; 429/503 is
+/// [`FetchError::Throttled`]; exit 0 with a 2xx/3xx status is the page;
+/// anything else is a [`FetchError::Client`] naming the status.
 fn decode_curl_output(url: &str, exit: i32, stdout: &[u8]) -> Result<String, FetchError> {
     let text = String::from_utf8_lossy(stdout);
     let text: &str = &text;
@@ -236,21 +232,12 @@ fn decode_curl_output(url: &str, exit: i32, stdout: &[u8]) -> Result<String, Fet
             "curl exited {exit} for {url} (no status line)"
         )));
     }
-    let status_code = status.parse::<u16>().ok();
-    if matches!(status_code, Some(401 | 403 | 418) | Some(500..=599)) {
-        return Err(FetchError::Unclassified {
-            status: status_code,
-            evidence: body.chars().take(4096).collect(),
-        });
-    }
     Err(FetchError::Client(format!(
         "HTTP {status} for {url} (curl exited {exit})"
     )))
 }
 
 fn one_line(summary: &SeasonCrawl) -> String {
-    // Access/policy and 5xx responses remain deterministic crawl
-    // failures; Jev may classify the bounded evidence for manual review.
     let mut line = format!(
         "{}: +{} fetched (boxes {}, monthly {}, totals {}), missing {}",
         summary.slug,
@@ -260,9 +247,6 @@ fn one_line(summary: &SeasonCrawl) -> String {
         summary.totals.fetched.len(),
         summary.dead.len(),
     );
-    if let Some(classified) = &summary.classified_failure {
-        line.push_str(&format!(" — Jev={:?}", classified.choice));
-    }
     if let Some(e) = &summary.error {
         line.push_str(&format!(" — FAILED: {e}"));
     }
@@ -310,13 +294,6 @@ fn dry_run(args: &Args) -> Result<(), String> {
 fn run(args: &Args) -> Result<(), String> {
     let interval = Duration::from_secs_f64(args.interval_secs);
     let endings: Vec<i32> = (args.from..=args.to).collect();
-    let judge = match DirectHttpJev::from_env() {
-        Ok(judge) => Some(Arc::new(judge)),
-        Err(e) => {
-            eprintln!("Jev disabled; deterministic crawl will continue: {e}");
-            None
-        }
-    };
     // Season-level parallelism: exactly `workers` threads, each taking a
     // contiguous block of seasons, one season batch at a time each
     // (aggregate request rate = workers / interval).
@@ -326,19 +303,17 @@ fn run(args: &Args) -> Result<(), String> {
         let mut handles = Vec::new();
         for chunk in endings.chunks(chunk_len) {
             let chunk: Vec<i32> = chunk.to_vec();
-            let judge = judge.clone();
             handles.push(scope.spawn(move || {
                 let client = CurlClient::live();
                 let mut failed = 0usize;
                 for ending in chunk {
-                    let summary = crawl_season_with_jev(
+                    let summary = crawl_season(
                         &client,
                         SOURCE,
                         ending,
                         &args.root,
                         args.monthly,
                         interval,
-                        judge.as_deref().map(|judge| judge as &dyn JevJudge),
                         &mut std::thread::sleep,
                     );
                     if summary.error.is_some() {
@@ -390,20 +365,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn live_curl_preserves_http_error_bodies() {
+    fn live_curl_bounds_the_response_body() {
         let command = curl_command("curl", "archive-contact", 30, "https://example.test/game");
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy())
             .collect::<Vec<_>>();
-        assert!(args.iter().any(|arg| arg == "--fail-with-body"), "{args:?}");
+        assert!(args.iter().any(|arg| arg == "--fail"), "{args:?}");
         assert!(args.iter().any(|arg| arg == "--max-filesize"), "{args:?}");
         assert!(
             args.iter()
                 .any(|arg| arg == &CURL_MAX_RESPONSE_BYTES.to_string()),
             "{args:?}"
         );
-        assert!(!args.iter().any(|arg| arg == "--fail"), "{args:?}");
+        assert!(
+            !args.iter().any(|arg| arg == "--fail-with-body"),
+            "{args:?}"
+        );
     }
 
     #[test]
@@ -431,16 +409,10 @@ mod tests {
             decode_curl_output("u", 22, b"\n503"),
             Err(FetchError::Throttled(_))
         ));
-        // Other policy-sensitive HTTP responses retain bounded evidence for
-        // the optional typed classifier.
+        // Other HTTP failures → Client naming the status.
         let err = decode_curl_output("u", 22, b"blocked by policy\n403").unwrap_err();
-        assert!(matches!(
-            err,
-            FetchError::Unclassified {
-                status: Some(403),
-                ref evidence
-            } if evidence == "blocked by policy"
-        ));
+        assert!(matches!(err, FetchError::Client(_)), "{err:?}");
+        assert!(err.to_string().contains("403"), "{err}");
         // Transport failure without a status line.
         let err = decode_curl_output("u", 7, b"").unwrap_err();
         assert!(err.to_string().contains("exited 7"), "{err}");

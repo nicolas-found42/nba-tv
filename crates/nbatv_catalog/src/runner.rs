@@ -84,10 +84,9 @@ use crate::drive::{mirror_ready_entries, MirrorConfig, MirrorError, MirrorReport
 use crate::fetch::{
     cache_path, fetch_to_cache, src_tag_for_url, DurationProbe, FetchSpec, TapeFetcher,
 };
-use crate::jev::{DisabledJevJudge, JevJudge};
 use crate::politeness::PolitenessConfig;
 use crate::probe::ProbeRegistry;
-use crate::sweep::{game_context_for, sweep_game_with_judge};
+use crate::sweep::{game_context_for, sweep_game};
 use nbatv_db::PlaybackClass;
 use rusqlite::Connection;
 use std::path::PathBuf;
@@ -288,17 +287,6 @@ pub fn run_backfill(
     config: &BackfillConfig,
     ports: &BackfillPorts<'_>,
 ) -> Result<BackfillReport, RunnerError> {
-    run_backfill_with_judge(conn, config, ports, &DisabledJevJudge)
-}
-
-/// Run the backfill with the optional Jev sidecar enabled for candidate
-/// matching. Transport failures remain per-decision and never fail a sweep.
-pub fn run_backfill_with_judge(
-    conn: &Connection,
-    config: &BackfillConfig,
-    ports: &BackfillPorts<'_>,
-    judge: &dyn JevJudge,
-) -> Result<BackfillReport, RunnerError> {
     let years = expand_season_range(&config.season_start, &config.season_end)?;
     let mut games = Vec::new();
     for year in years {
@@ -321,14 +309,13 @@ pub fn run_backfill_with_judge(
             skipped += 1;
             continue;
         };
-        let report = sweep_game_with_judge(
+        let report = sweep_game(
             conn,
             &game,
             &ports.probes,
             &ports.politeness,
             &mut quota,
             &config.now,
-            judge,
         )
         .map_err(|err| match err {
             crate::sweep::SweepError::BadNow(now) => RunnerError::BadNow(now),

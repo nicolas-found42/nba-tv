@@ -48,13 +48,9 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::jev::{
-    DirectHttpJev, JevConfidence, JevError, JevJudge, SearchTemplate, DEFAULT_THRESHOLD,
-};
 use crate::politeness::PolitenessConfig;
 use crate::probe::{GameContext, ProbeCandidate, ProbeOutcome, ProbeRegistry, SourceProbe};
 use nbatv_ladder::YoutubeQuota;
-use std::sync::Arc;
 
 /// Full-game floor in seconds (70 min): the `--match-filters` gate and the
 /// duration research 15 §3.2 requires alongside exact date + both teams.
@@ -65,19 +61,9 @@ pub const SEARCH_RESULT_COUNT: u32 = 10;
 pub const SOCKET_TIMEOUT_SECS: u64 = 30;
 
 /// Rung-2 probe shelling out to a `yt-dlp` sidecar binary.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct YtdlpProbe {
     binary: PathBuf,
-    judge: Option<Arc<dyn JevJudge>>,
-}
-
-impl std::fmt::Debug for YtdlpProbe {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("YtdlpProbe")
-            .field("binary", &self.binary)
-            .field("jev_enabled", &self.judge.is_some())
-            .finish()
-    }
 }
 
 impl YtdlpProbe {
@@ -85,20 +71,6 @@ impl YtdlpProbe {
     pub fn new() -> Self {
         Self {
             binary: PathBuf::from("yt-dlp"),
-            judge: None,
-        }
-    }
-
-    /// Probe with the optional Jev sidecar enabled from the environment.
-    /// Missing or malformed configuration keeps the deterministic query.
-    pub fn new_with_env_jev() -> Self {
-        match DirectHttpJev::from_env() {
-            Ok(judge) => Self::new().with_judge(Box::new(judge)),
-            Err(JevError::MissingApiKey) => Self::new(),
-            Err(error) => {
-                eprintln!("nbatv-catalog: Jev search templates disabled: {error}");
-                Self::new()
-            }
         }
     }
 
@@ -107,16 +79,9 @@ impl YtdlpProbe {
     pub fn with_binary(path: impl Into<PathBuf>) -> Self {
         Self {
             binary: path.into(),
-            judge: None,
         }
     }
 
-    /// Attach the optional search-template sidecar. The default remains
-    /// disabled, and every fallback keeps the current teams-and-date query.
-    pub fn with_judge(mut self, judge: Box<dyn JevJudge>) -> Self {
-        self.judge = Some(judge.into());
-        self
-    }
     /// The sidecar binary this probe invokes.
     pub fn binary(&self) -> &Path {
         &self.binary
@@ -140,46 +105,8 @@ impl YtdlpProbe {
         )
     }
 
-    /// Render only templates supported by the current deterministic Game
-    /// context. Unsupported templates fall back instead of inventing a round
-    /// label or Finals game number that the Archive does not contain.
-    fn search_pattern_for(game: &GameContext, template: SearchTemplate) -> Option<String> {
-        match template {
-            SearchTemplate::TeamsAndDate => Some(Self::search_pattern(game)),
-            SearchTemplate::TeamArchive => Some(format!(
-                "{} vs {} Complete Game Archive {}",
-                game.away_team, game.home_team, game.date
-            )),
-            SearchTemplate::FinalsGameNumber
-            | SearchTemplate::EraRoundLabel
-            | SearchTemplate::SourceSpecific => None,
-        }
-    }
-
-    fn selected_search_query(&self, game: &GameContext) -> String {
-        let selected = self
-            .judge
-            .as_ref()
-            .and_then(|judge| {
-                judge
-                    .choose_search_template(game, self.name())
-                    .ok()
-                    .flatten()
-            })
-            .filter(|selection| JevConfidence(selection.confidence).is_decisive(DEFAULT_THRESHOLD))
-            .and_then(|selection| Self::search_pattern_for(game, selection.template));
-        selected.map_or_else(
-            || Self::search_query(game),
-            |pattern| format!("ytsearch{SEARCH_RESULT_COUNT}:{pattern}"),
-        )
-    }
-
-    #[cfg(test)]
+    /// The sidecar argv for one game (binary excluded).
     fn argv(game: &GameContext, politeness: &PolitenessConfig) -> Vec<String> {
-        Self::argv_for_query(politeness, &Self::search_query(game))
-    }
-
-    fn argv_for_query(politeness: &PolitenessConfig, query: &str) -> Vec<String> {
         vec![
             "--flat-playlist".to_owned(),
             "--dump-json".to_owned(),
@@ -189,7 +116,7 @@ impl YtdlpProbe {
             format!("{}", politeness.ytdlp_request_sleep.as_secs_f64()),
             "--socket-timeout".to_owned(),
             SOCKET_TIMEOUT_SECS.to_string(),
-            query.to_owned(),
+            Self::search_query(game),
         ]
     }
 
@@ -223,13 +150,12 @@ impl SourceProbe for YtdlpProbe {
         politeness: &PolitenessConfig,
         quota: &mut YoutubeQuota,
     ) -> ProbeOutcome {
-        let fallback_query = Self::search_query(game);
+        let query = Self::search_query(game);
         if quota.schedule(1) == 0 {
-            return ProbeOutcome::deferred(fallback_query);
+            return ProbeOutcome::deferred(query);
         }
-        let query = self.selected_search_query(game);
         let output = Command::new(&self.binary)
-            .args(Self::argv_for_query(politeness, &query))
+            .args(Self::argv(game, politeness))
             .stdin(Stdio::null())
             .output();
         let output = match output {
