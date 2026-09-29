@@ -1,8 +1,10 @@
 [package]
 name = "nbatv_db"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+rust-version.workspace = true
 description = "SQLite storage for the nba-tv personal NBA archive"
+license = "MIT"
 
 [dependencies]
 rusqlite = { workspace = true }
