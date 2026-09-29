@@ -16,10 +16,12 @@ use rusqlite::Connection;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 const GAME_ID: &str = "194611010TRH";
 const T0: &str = "2026-01-01";
+static NEXT_FAKE_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
 fn ctx() -> GameContext {
     GameContext {
@@ -39,14 +41,15 @@ fn full_entry() -> &'static str {
 /// The dir is removed when the guard drops (repo convention: best-effort
 /// cleanup, no tempdir crate).
 fn install_fake(body: &str) -> (PathBuf, PathBuf, TempDirGuard) {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    // Nanos plus address entropy so parallel tests never share a dir.
-    let unique = format!("{}-{nanos}-{:p}", std::process::id(), &nanos);
-    let dir = std::env::temp_dir().join(format!("ytdlp-fake-{unique}"));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    let dir = loop {
+        let id = NEXT_FAKE_DIR_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("ytdlp-fake-{}-{id}", std::process::id()));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => break dir,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("create fake binary temp dir: {error}"),
+        }
+    };
     let bin = dir.join("fake-ytdlp.sh");
     let log = dir.join("argv.log");
     // `echo "$@"` would join with spaces; one-arg-per-line keeps assertions exact.
@@ -63,6 +66,23 @@ fn install_fake(body: &str) -> (PathBuf, PathBuf, TempDirGuard) {
     std::fs::set_permissions(&bin, perms).expect("chmod");
     let guard = TempDirGuard { dir: dir.clone() };
     (bin, log, guard)
+}
+
+#[test]
+fn parallel_fake_binaries_get_distinct_temp_dirs() {
+    let workers = (0..32)
+        .map(|_| {
+            std::thread::spawn(|| {
+                let (bin, _, guard) = install_fake(":");
+                (bin.parent().expect("binary parent").to_path_buf(), guard)
+            })
+        })
+        .collect::<Vec<_>>();
+    let dirs = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("install fake binary").0)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(dirs.len(), 32, "parallel fakes must not share temp dirs");
 }
 
 /// Removes the fake binary's temp dir on drop.
