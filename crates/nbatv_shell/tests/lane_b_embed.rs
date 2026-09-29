@@ -8,6 +8,7 @@
 //!   app never sees credentials.
 //! - The webview profile (where cookies live) stays out of the repo tree
 //!   and out of the data cache.
+//!
 //! The real webview is verified by a documented visual smoke run only;
 //! everything here runs without a window or network.
 //!

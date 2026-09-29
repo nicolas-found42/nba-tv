@@ -13,7 +13,10 @@ pub mod model;
 pub mod route;
 pub mod store;
 pub use app::{LaneAStatus, ShellApp};
-pub use db_store::{DbStore, Store, ARCHIVE_DB_PATH};
+pub use db_store::{
+    mirror_sign_in_line, mirror_sign_in_line_unknown, webview_sign_in_line, DbStore, SignInLine,
+    Store, ARCHIVE_DB_PATH,
+};
 pub use embed::{
     cue_snippet, embed_url_for, is_sanctioned_embed, is_sign_in_url, EmbedBounds, EmbedError,
     EmbedHost, EmbedSession, LaneBStatus, WEBVIEW_PROFILE_DIR,

@@ -87,7 +87,7 @@ pub fn playback_class_for_rank(rank: u8) -> Option<PlaybackClass> {
     match rank {
         1 | 4 => Some(PlaybackClass::ProgressiveFile),
         0 | 2 | 3 => Some(PlaybackClass::ExternalSurface),
-        5 | 6 | 7 => Some(PlaybackClass::Pointer),
+        5..=7 => Some(PlaybackClass::Pointer),
         _ => None,
     }
 }
@@ -146,7 +146,7 @@ impl Team {
 
     /// True when the club's span covers the season starting in `year`.
     pub fn active_in(&self, year: u16) -> bool {
-        self.active_from <= year && self.active_to.map_or(true, |end| year <= end)
+        self.active_from <= year && self.active_to.is_none_or(|end| year <= end)
     }
 
     /// Dashboard tag: `"defunct"` or `"active"`.

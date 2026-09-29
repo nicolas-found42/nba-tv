@@ -98,9 +98,10 @@ impl ShellApp {
     }
 
     /// Hermetic empty archive (no filesystem, no fixtures): pure-logic
-    /// headless tests use this.
+    /// headless tests use this. The store degrades to [`Store::Empty`] if
+    /// even in-memory SQLite cannot open (never observed); no panic path.
     pub fn empty() -> Self {
-        Self::with_store(Store::Db(DbStore::in_memory()))
+        Self::with_store(Store::in_memory())
     }
 
     /// Offline/test path: fixed fixtures, no database. The live path never
@@ -232,9 +233,10 @@ impl ShellApp {
         // host from the previous press is dropped here too: every explicit
         // press re-arms the one-shot open (and a non-embed press retires
         // the overlay, matching Lane A's retire-on-non-progressive rule).
-        self.lane_b_session = crate::embed::EmbedSession::for_dispatch(
-            self.last_dispatch.as_ref().expect("just recorded"),
-        );
+        self.lane_b_session = self
+            .last_dispatch
+            .as_ref()
+            .and_then(crate::embed::EmbedSession::for_dispatch);
         #[cfg(feature = "lane-b")]
         {
             self.embed_host = None;
@@ -499,6 +501,23 @@ impl eframe::App for ShellApp {
             });
         });
 
+        // Sign-ins section (story #24): one always-available surface naming
+        // which stage needs which credential. Sits under the breadcrumbs,
+        // above the browse screens — small, collapsed to two rows.
+        egui::TopBottomPanel::top("shell-sign-ins").show(ctx, |ui| {
+            ui.set_min_height(0.0);
+            ui.horizontal(|ui| {
+                ui.strong(sign_ins_heading());
+            });
+            for line in self.store.sign_ins_section() {
+                ui.horizontal(|ui| {
+                    ui.monospace(line.stage);
+                    ui.monospace(line.state);
+                    ui.weak(line.detail);
+                });
+            }
+        });
+
         egui::CentralPanel::default().show(ctx, |ui| {
             // Clone the route so view builders can navigate freely.
             match self.route.clone() {
@@ -507,6 +526,19 @@ impl eframe::App for ShellApp {
                 Route::Team { season, team } => self.show_team(ui, &season, &team),
                 Route::Game { game_id } => self.show_game(ui, &game_id),
             }
+        });
+
+        // Attribution footer (spec #3: prominent NBA.com attribution, plus
+        // the Sports-Reference line the README promises). Pure lines from
+        // `attribution_lines` so tests pin the exact wording.
+        egui::TopBottomPanel::bottom("shell-attribution").show(ctx, |ui| {
+            ui.separator();
+            ui.set_min_height(0.0);
+            ui.vertical(|ui| {
+                for line in attribution_lines() {
+                    ui.weak(line);
+                }
+            });
         });
 
         // Lane B only: parent the child webview for the Game view's
@@ -820,7 +852,7 @@ impl ShellApp {
                 }
             }
             // Keep ticking while the stream runs. One frame per tick at
-            // ~30fps: close enough for archive footage without wall-clock
+            // ~30fps: close enough for Game Tape without wall-clock
             // sync (a driver slice can pace to the source rate later).
             if matches!(self.lane_a_status, Some(LaneAStatus::Playing)) {
                 ui.ctx()
@@ -966,9 +998,74 @@ fn banner_color(tape: TapeState) -> egui::Color32 {
     }
 }
 
+/// The two attribution lines the Shell footer owes its data sources
+/// (README "Personal-use-only data terms"; NBA.com ToS §9 requires
+/// prominent attribution). Pure and unit-tested: the footer panel renders
+/// exactly these lines, so the README claim stays true by construction.
+pub fn attribution_lines() -> Vec<&'static str> {
+    vec![
+        "Schedule and Box Score data courtesy of Sports-Reference.",
+        "NBA statistics courtesy of NBA.com, used for private non-commercial purposes.",
+    ]
+}
+
+/// Heading of the Sign-ins section (story #24).
+pub fn sign_ins_heading() -> &'static str {
+    "Sign-ins — which stage needs which credential"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attribution_lines_carry_both_promised_sources() {
+        let lines = attribution_lines();
+        assert_eq!(lines.len(), 2, "one line per promised source: {lines:?}");
+        // NBA.com: the ToS §9 wording the README promises (prominent
+        // attribution + private non-commercial purpose).
+        assert!(
+            lines[1].starts_with("NBA statistics courtesy of NBA.com"),
+            "NBA.com line names the source and purpose: {lines:?}"
+        );
+        assert!(lines[1].contains("private non-commercial"));
+        // Sports-Reference: the schedule/box backbone (Basketball-Reference).
+        assert!(
+            lines[0].starts_with("Schedule and Box Score data courtesy of Sports-Reference"),
+            "SR line names the backbone: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn sign_ins_heading_names_the_panel() {
+        assert!(sign_ins_heading().contains("Sign-ins"));
+        assert!(sign_ins_heading().contains("credential"));
+    }
+
+    #[test]
+    fn sign_ins_lines_flow_through_the_store_seam() {
+        // The exact data the panel renders, through the same seam `update`
+        // uses: both stages present on the fixture path too.
+        let app = ShellApp::with_fixture();
+        let lines = app.store().sign_ins_section();
+        let stages: Vec<_> = lines.iter().map(|l| l.stage).collect();
+        assert_eq!(stages, ["Drive mirror", "Webview sessions"]);
+        // The Drive row shows the rclone remote requirement and honest
+        // unknown state (no per-frame rclone probe anywhere in the shell).
+        assert!(lines[0].credential.contains("nbatv-drive"));
+        assert_eq!(lines[0].state, "unknown");
+        assert!(lines[0].detail.contains("rclone config"));
+    }
+
+    #[test]
+    fn press_play_records_session_without_expect() {
+        // Regression pin: the press path builds the Lane B session without
+        // any unwrap on freshly recorded state.
+        let mut app = ShellApp::empty();
+        app.press_play("194611010TRH");
+        assert_eq!(app.last_dispatch(), Some(&PlayDispatch::Unavailable));
+        assert!(app.lane_b_session().is_none());
+    }
 
     #[test]
     fn navigate_sets_route_and_closes_palette() {
