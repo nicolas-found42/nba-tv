@@ -6,3 +6,12 @@ description = "Player Backend lanes for the nba-tv archive: Lane A (ffmpeg-sidec
 license = "MIT"
 [lints]
 workspace = true
+
+[features]
+default = []
+# Optional audio output (default OFF: needs libasound on Linux). Decodes
+# audio through a second ffmpeg sidecar into a cpal output stream.
+audio = ["dep:cpal"]
+
+[dependencies]
+cpal = { version = "0.17", optional = true, default-features = false }

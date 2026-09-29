@@ -6,6 +6,27 @@
 //! decoded RGBA frames become `egui` textures. The builders below produce
 //! argument vectors only — spawning the process is the shell's job — so
 //! they are fully testable with no media, no window, and no download.
+//!
+//! ## Why raw `std::process::Command`, not the `ffmpeg-sidecar` crate
+//!
+//! Issues #5 and #10 name the `ffmpeg-sidecar` crate as the binding. The
+//! code deliberately does not depend on it: [ADR 0003] keeps the
+//! dependency surface small (`nbatv_player` is a dependency-free leaf per
+//! ADR 0001) and treats `ffmpeg` as a user-provisioned process that
+//! workspace code spawns and never links. The pipe protocol here is three
+//! argument builders plus a `read_exact` loop ([`crate::pump`]), which
+//! is less code than the crate's event model. Revisit only if PTS control
+//! or progress parsing is needed; that would need its own ADR.
+//!
+//! [ADR 0003]: https://github.com/nicolas-found42/nba-tv/blob/main/docs/adr/0003-c-dependencies-and-sidecars.md
+//!
+//! ## Pacing and audio
+//!
+//! The pipe is untimed, so [`crate::paced`] releases frames at the source
+//! frame rate ([`parse_probe_report`] reads it from [`probe_args`] output)
+//! against a [`crate::clock::MediaClock`]. Audio is a second, independent
+//! sidecar built by [`audio_pipe_args`] and played through the optional
+//! `audio` cargo feature; see [`crate::clock`] for the master-clock rule.
 
 /// Arguments that ask ffmpeg to describe `src` without decoding it.
 ///
@@ -23,8 +44,8 @@ pub fn probe_args(src: &str) -> Vec<String> {
 ///
 /// Shape: `ffmpeg -hide_banner -i <src> -f rawvideo -pix_fmt rgba -`.
 /// The shell reads the pipe as a frame iterator and syncs video against
-/// the wall clock (see research 10 section 1.1). Audio, when wanted, is a
-/// second `-f s16le` pipe on the same design.
+/// the wall clock (see research 10 section 1.1; [`crate::paced`]). Audio,
+/// when wanted, is a separate ffmpeg process: [`audio_pipe_args`].
 pub fn play_pipe_args(src: &str) -> Vec<String> {
     vec![
         "-hide_banner".to_string(),
@@ -58,6 +79,88 @@ pub fn seek_play_args(src: &str, seconds: f64) -> Vec<String> {
         "-".to_string(),
     ]
 }
+
+/// Arguments that decode only the audio of `src` to raw interleaved
+/// little-endian `f32` PCM on stdout, starting at `start_seconds`.
+///
+/// Shape: `ffmpeg -hide_banner -ss <t> -i <src> -vn -f f32le -acodec
+/// pcm_f32le -ar <rate> -ac <channels> -`. The sidecar resamples and
+/// remixes to the output device's `sample_rate`/`channels`, so the reader
+/// needs no resampler. `-ss` is an input seek, like [`seek_play_args`],
+/// so a seeked audio respawn lands on the same offset as the video one.
+pub fn audio_pipe_args(
+    src: &str,
+    start_seconds: f64,
+    sample_rate: u32,
+    channels: u16,
+) -> Vec<String> {
+    vec![
+        "-hide_banner".to_string(),
+        "-ss".to_string(),
+        format!("{start_seconds}"),
+        "-i".to_string(),
+        src.to_string(),
+        "-vn".to_string(),
+        "-f".to_string(),
+        "f32le".to_string(),
+        "-acodec".to_string(),
+        "pcm_f32le".to_string(),
+        "-ar".to_string(),
+        sample_rate.to_string(),
+        "-ac".to_string(),
+        channels.to_string(),
+        "-".to_string(),
+    ]
+}
+
+/// What the ffmpeg stream report says about a tape.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ProbeReport {
+    /// Video frame rate, when the report names one.
+    pub fps: Option<f64>,
+    /// Whether the tape has at least one audio stream.
+    pub has_audio: bool,
+}
+
+/// Parse the stderr report of `ffmpeg -hide_banner -i <src>` (see
+/// [`probe_args`]).
+///
+/// Reads the first `Video:` stream line for `<n> fps` (falling back to
+/// `<n> tbr`) and checks for any `Audio:` stream. Unknown or garbled
+/// reports yield the default (no fps, no audio), never a panic.
+pub fn parse_probe_report(report: &str) -> ProbeReport {
+    let mut out = ProbeReport::default();
+    for line in report.lines() {
+        let line = line.trim();
+        if !line.starts_with("Stream #") {
+            continue;
+        }
+        if line.contains(": Audio:") {
+            out.has_audio = true;
+        } else if line.contains(": Video:") && out.fps.is_none() {
+            out.fps = rate_before(line, " fps").or_else(|| rate_before(line, " tbr"));
+        }
+    }
+    out
+}
+
+/// The positive finite number written right before `unit` in `line`
+/// (e.g. `"29.97"` in `"..., 29.97 fps, ..."`); `k` suffix means x1000.
+fn rate_before(line: &str, unit: &str) -> Option<f64> {
+    let end = line.find(unit)?;
+    let head = &line[..end];
+    let start = head
+        .rfind(|c: char| !(c.is_ascii_digit() || c == '.' || c == 'k'))
+        .map_or(0, |i| i + 1);
+    let token = &head[start..];
+    let (digits, scale) = match token.strip_suffix('k') {
+        Some(d) => (d, 1000.0),
+        None => (token, 1.0),
+    };
+    let value = digits.parse::<f64>().ok()? * scale;
+    (value.is_finite() && value > 0.0).then_some(value)
+}
+
 /// Normalized Lane A decode extent, in pixels.
 ///
 /// The rawvideo pipe carries no header: the byte count of every frame is
@@ -191,6 +294,61 @@ pub fn is_moov_first(moov_offset: Option<u64>, mdat_offset: Option<u64>) -> bool
     }
 }
 
+/// Scan the top-level MP4 atoms of `bytes` for `moov`/`mdat` offsets.
+///
+/// Returns `(moov_offset, mdat_offset)`, each `None` when absent. Feed the
+/// pair to [`is_moov_first`]. Handles 32-bit sizes, `size == 1` 64-bit
+/// largesize, and `size == 0` (extends to EOF); a truncated or corrupt
+/// atom header ends the scan instead of panicking.
+pub fn mp4_top_level_offsets(bytes: &[u8]) -> (Option<u64>, Option<u64>) {
+    let mut moov = None;
+    let mut mdat = None;
+    let mut pos = 0usize;
+    while pos + 8 <= bytes.len() {
+        let size32 =
+            u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as u64;
+        let tag = &bytes[pos + 4..pos + 8];
+        let (header, size) = if size32 == 1 {
+            if pos + 16 > bytes.len() {
+                break;
+            }
+            let large = u64::from_be_bytes([
+                bytes[pos + 8],
+                bytes[pos + 9],
+                bytes[pos + 10],
+                bytes[pos + 11],
+                bytes[pos + 12],
+                bytes[pos + 13],
+                bytes[pos + 14],
+                bytes[pos + 15],
+            ]);
+            (16u64, large)
+        } else {
+            (8u64, size32)
+        };
+        if size == 0 {
+            // Extends to EOF: record a trailing mdat tag, then stop.
+            if tag == b"mdat" && mdat.is_none() {
+                mdat = Some(pos as u64);
+            }
+            break;
+        }
+        if size < header || pos as u64 + size > bytes.len() as u64 {
+            break;
+        }
+        if tag == b"moov" && moov.is_none() {
+            moov = Some(pos as u64);
+        } else if tag == b"mdat" && mdat.is_none() {
+            mdat = Some(pos as u64);
+        }
+        if moov.is_some() && mdat.is_some() {
+            break;
+        }
+        pos += size as usize;
+    }
+    (moov, mdat)
+}
+
 /// One decoded RGBA frame, straight off the sidecar pipe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawFrame {
@@ -296,6 +454,54 @@ mod tests {
             "ffmpeg -i in.mkv -c:v libx264 -crf 20 -preset medium -c:a aac -b:a 160k -movflags +faststart out.mp4"
         );
         assert!(args.iter().any(|a| a == "+faststart"));
+    }
+
+    #[test]
+    fn audio_pipe_is_video_free_f32le_at_the_requested_format() {
+        let args = audio_pipe_args("tape.mp4", 12.5, 48_000, 2);
+        let rendered = args.join(" ");
+        assert_eq!(
+            rendered,
+            "-hide_banner -ss 12.5 -i tape.mp4 -vn -f f32le -acodec pcm_f32le -ar 48000 -ac 2 -"
+        );
+        let ss = args.iter().position(|a| a == "-ss").expect("-ss");
+        let input = args.iter().position(|a| a == "-i").expect("-i");
+        assert_eq!(ss + 2, input, "input seek shape must hold");
+    }
+
+    #[test]
+    fn probe_report_reads_fps_and_audio() {
+        let report = "Input #0, mov,mp4, from 't.mp4':\n  Duration: 00:00:01.00, start: 0.000000, bitrate: 98 kb/s\n  Stream #0:0[0x1](und): Video: h264 (High 4:4:4 Predictive) (avc1 / 0x31637661), yuv444p(progressive), 32x32 [SAR 1:1 DAR 1:1], 12 kb/s, 5 fps, 5 tbr, 10240 tbn (default)\n  Stream #0:1[0x2](und): Audio: aac (LC) (mp4a / 0x6134706D), 44100 Hz, mono, fltp, 70 kb/s (default)\n";
+        let probe = parse_probe_report(report);
+        assert_eq!(probe.fps, Some(5.0));
+        assert!(probe.has_audio);
+    }
+
+    #[test]
+    fn probe_report_handles_fractional_video_only_and_tbr_fallback() {
+        let ntsc = "  Stream #0:0: Video: h264, yuv420p, 640x360, 29.97 fps, 29.97 tbr, 90k tbn";
+        assert_eq!(parse_probe_report(ntsc).fps, Some(29.97));
+        assert!(!parse_probe_report(ntsc).has_audio);
+
+        let tbr_only = "  Stream #0:0: Video: mpeg4, yuv420p, 320x240, 25 tbr, 25 tbn";
+        assert_eq!(parse_probe_report(tbr_only).fps, Some(25.0));
+
+        let kilo = "  Stream #0:0: Video: h264, yuv420p, 640x360, 1k tbr, 1k tbn";
+        assert_eq!(parse_probe_report(kilo).fps, Some(1000.0));
+    }
+
+    #[test]
+    fn probe_report_ignores_garbage() {
+        for junk in [
+            "",
+            "no streams here",
+            "Stream #0:0: Video: h264, 0 fps",
+            "Stream #0:0: Video: x, nan fps",
+        ] {
+            let probe = parse_probe_report(junk);
+            assert_eq!(probe.fps, None, "junk {junk:?}");
+            assert!(!probe.has_audio);
+        }
     }
 
     #[test]
@@ -476,59 +682,6 @@ mod tests {
         .is_progressive_ready());
     }
 
-    /// Scan top-level MP4 atoms for `moov`/`mdat` offsets. Returns
-    /// `(moov_offset, mdat_offset)`; either is `None` when absent. Handles
-    /// 32-bit sizes, `size == 1` 64-bit largesize, and `size == 0` (to EOF).
-    fn top_level_offsets(bytes: &[u8]) -> (Option<u64>, Option<u64>) {
-        let mut moov = None;
-        let mut mdat = None;
-        let mut pos = 0usize;
-        while pos + 8 <= bytes.len() {
-            let size32 =
-                u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
-                    as u64;
-            let tag = &bytes[pos + 4..pos + 8];
-            let (header, size) = if size32 == 1 {
-                if pos + 16 > bytes.len() {
-                    break;
-                }
-                let large = u64::from_be_bytes([
-                    bytes[pos + 8],
-                    bytes[pos + 9],
-                    bytes[pos + 10],
-                    bytes[pos + 11],
-                    bytes[pos + 12],
-                    bytes[pos + 13],
-                    bytes[pos + 14],
-                    bytes[pos + 15],
-                ]);
-                (16u64, large)
-            } else {
-                (8u64, size32)
-            };
-            if size == 0 {
-                // Extends to EOF: record a trailing mdat tag, then stop.
-                if tag == b"mdat" && mdat.is_none() {
-                    mdat = Some(pos as u64);
-                }
-                break;
-            }
-            if size < header || pos as u64 + size > bytes.len() as u64 {
-                break;
-            }
-            if tag == b"moov" && moov.is_none() {
-                moov = Some(pos as u64);
-            } else if tag == b"mdat" && mdat.is_none() {
-                mdat = Some(pos as u64);
-            }
-            if moov.is_some() && mdat.is_some() {
-                break;
-            }
-            pos += size as usize;
-        }
-        (moov, mdat)
-    }
-
     #[test]
     fn top_level_offsets_spots_moov_before_mdat() {
         // ftyp(24) + moov(8) + mdat(8): fabricated atoms, real layout rule.
@@ -539,95 +692,9 @@ mod tests {
         bytes[28..32].copy_from_slice(b"moov");
         bytes[32..36].copy_from_slice(&8u32.to_be_bytes());
         bytes[36..40].copy_from_slice(b"mdat");
-        let (moov, mdat) = top_level_offsets(&bytes);
+        let (moov, mdat) = mp4_top_level_offsets(&bytes);
         assert_eq!((moov, mdat), (Some(24), Some(32)));
         assert!(is_moov_first(moov, mdat));
-    }
-
-    /// Real normalize round-trip: synthesize 1 s of `testsrc`, run the exact
-    /// [`normalize_args`] vector through ffmpeg, then locate `moov`/`mdat`
-    /// in the output bytes and prove [`is_moov_first`]. Skips gracefully
-    /// when ffmpeg is absent. Synthetic media in a temp dir only.
-    #[test]
-    fn normalize_round_trip_writes_moov_first() {
-        if !std::process::Command::new("ffmpeg")
-            .arg("-version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
-            println!("SKIP normalize_round_trip_writes_moov_first: ffmpeg not installed");
-            return;
-        }
-        let dir = NormTempDir::create();
-        let src = dir.path().join("src.mp4");
-        let synth = std::process::Command::new("ffmpeg")
-            .args([
-                "-y",
-                "-v",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc=duration=1:size=32x32:rate=5",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-            ])
-            .arg(&src)
-            .status()
-            .expect("spawn ffmpeg to synthesize fixture");
-        assert!(synth.success(), "fixture synthesis must succeed");
-        let out = dir.path().join("norm.mp4");
-        let args = normalize_args(&src.to_string_lossy(), &out.to_string_lossy());
-        assert!(args.iter().any(|a| a == "+faststart"));
-        // Builders emit argument vectors only (no binary prefix);
-        // spawning is the caller's job.
-        let normalized = std::process::Command::new("ffmpeg")
-            .args(["-y", "-v", "error"])
-            .args(&args)
-            .status()
-            .expect("spawn ffmpeg normalizer");
-        assert!(normalized.success(), "normalize must succeed: {args:?}");
-        let bytes = std::fs::read(&out).expect("normalized output exists");
-        let (moov, mdat) = top_level_offsets(&bytes);
-        assert!(
-            moov.is_some() && mdat.is_some(),
-            "normalized MP4 must contain moov + mdat, got {moov:?}/{mdat:?}"
-        );
-        assert!(
-            is_moov_first(moov, mdat),
-            "+faststart must place moov before mdat, got {moov:?}/{mdat:?}"
-        );
-        let readiness = Mp4RangeReadiness {
-            moov_first: is_moov_first(moov, mdat),
-            accepts_range: supports_range(Some("bytes")),
-        };
-        assert!(readiness.is_progressive_ready());
-    }
-
-    /// Unique scratch dir under the system temp dir, removed on drop —
-    /// panics still clean up (same pattern as `pump::tests::TempDir`).
-    struct NormTempDir(std::path::PathBuf);
-
-    impl NormTempDir {
-        fn create() -> Self {
-            let dir = std::env::temp_dir().join(format!("nbatv-norm-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).expect("scratch temp dir");
-            NormTempDir(dir)
-        }
-
-        fn path(&self) -> &std::path::Path {
-            &self.0
-        }
-    }
-
-    impl Drop for NormTempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
     }
 
     /// Presence probe only: passes whether or not ffmpeg is installed.

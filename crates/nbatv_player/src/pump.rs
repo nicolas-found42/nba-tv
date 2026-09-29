@@ -32,6 +32,12 @@ pub enum PumpError {
     FrameTooLarge,
     /// The sidecar `ffmpeg` process could not be spawned.
     Spawn(std::io::Error),
+    /// The spawned sidecar came back without a piped stdio handle
+    /// (`"stdout"` or `"stderr"`). The child is killed before this is
+    /// returned.
+    MissingPipe(&'static str),
+    /// The frame rate for pacing is zero, negative, or not finite.
+    BadFrameRate,
 }
 
 impl std::fmt::Display for PumpError {
@@ -40,6 +46,10 @@ impl std::fmt::Display for PumpError {
             PumpError::ZeroExtent => write!(f, "pump extent must be non-zero"),
             PumpError::FrameTooLarge => write!(f, "pump frame size overflows usize"),
             PumpError::Spawn(err) => write!(f, "could not spawn ffmpeg sidecar: {err}"),
+            PumpError::MissingPipe(name) => {
+                write!(f, "ffmpeg sidecar started without a piped {name}")
+            }
+            PumpError::BadFrameRate => write!(f, "frame rate must be finite and positive"),
         }
     }
 }
@@ -188,6 +198,12 @@ impl Drop for Pump {
     }
 }
 
+/// Turn a missing stdio handle into a [`PumpError::MissingPipe`] instead of
+/// a panic (library code must not `expect` on process plumbing).
+fn require_pipe<T>(pipe: Option<T>, name: &'static str) -> Result<T, PumpError> {
+    pipe.ok_or(PumpError::MissingPipe(name))
+}
+
 /// Validate the declared extent and return the per-frame byte count.
 fn checked_frame_len(width: u32, height: u32) -> Result<usize, PumpError> {
     if width == 0 || height == 0 {
@@ -212,21 +228,25 @@ fn spawn_child(args: &[String]) -> Result<(Child, ChildStdout), PumpError> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(PumpError::Spawn)?;
-    let stdout = child
-        .stdout
-        .take()
-        .expect("ffmpeg stdout was requested piped");
-    let mut stderr = child
-        .stderr
-        .take()
-        .expect("ffmpeg stderr was requested piped");
+    let (stdout, stderr) = match (
+        require_pipe(child.stdout.take(), "stdout"),
+        require_pipe(child.stderr.take(), "stderr"),
+    ) {
+        (Ok(stdout), Ok(stderr)) => (stdout, stderr),
+        (Err(err), _) | (_, Err(err)) => {
+            // Never leak a running sidecar on the error path.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(err);
+        }
+    };
+    let mut stderr = stderr;
     std::thread::spawn(move || {
         let mut sink = [0u8; 8192];
         loop {
             match stderr.read(&mut sink) {
-                Ok(0) => break,
+                Ok(0) | Err(_) => break,
                 Ok(_) => {}
-                Err(_) => break,
             }
         }
     });
@@ -300,6 +320,17 @@ mod tests {
             Pump::open("tape.mp4", 32, 0),
             Err(PumpError::ZeroExtent)
         ));
+    }
+
+    #[test]
+    fn missing_pipe_is_an_error_not_a_panic() {
+        let err = require_pipe::<()>(None, "stdout").expect_err("absent pipe must error");
+        assert!(matches!(err, PumpError::MissingPipe("stdout")));
+        assert_eq!(
+            err.to_string(),
+            "ffmpeg sidecar started without a piped stdout"
+        );
+        assert_eq!(require_pipe(Some(7), "stderr").ok(), Some(7));
     }
 
     #[test]
