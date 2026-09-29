@@ -264,6 +264,59 @@ fn candidate_contradiction_demotes_but_never_promotes() {
 }
 
 #[test]
+fn resweep_demoting_a_candidate_removes_its_stale_tape_source() {
+    let conn = seeded_conn();
+    let first_p0 = scripted(0, confirmed_evidence());
+    let (_, first_p1, first_p2, first_p3, first_p4) = reject_probes();
+    let first_reg = all_reject_registry(&first_p0, &first_p1, &first_p2, &first_p3, &first_p4);
+    let mut quota = quota();
+
+    let first = sweep_game(&conn, &ctx(), &first_reg, &polite(), &mut quota, T0).unwrap();
+    assert!(matches!(first.status, SweepStatus::Playable { .. }));
+    assert_eq!(nbatv_db::tape_sources_for(&conn, GAME_ID).unwrap().len(), 1);
+    nbatv_db::upsert_cache_entry(
+        &conn,
+        &nbatv_db::CacheEntry {
+            game_id: GAME_ID.to_owned(),
+            rank: 0,
+            source_class: "catalog".to_owned(),
+            local_path: "tape/194611010TRH.mp4".to_owned(),
+            bytes: 123,
+            verified_at: Some(T0.to_owned()),
+            state: nbatv_db::CacheState::Ready,
+        },
+    )
+    .unwrap();
+
+    let mut contradicted = confirmed_evidence();
+    contradicted.url_or_pointer = "contradiction".to_owned();
+    let p0 = scripted(0, contradicted);
+    let (_, p1, p2, p3, p4) = reject_probes();
+    let reg = all_reject_registry(&p0, &p1, &p2, &p3, &p4);
+    let second = sweep_game_with_judge(
+        &conn,
+        &ctx(),
+        &reg,
+        &polite(),
+        &mut quota,
+        "2026-04-02",
+        &CandidatePolicyJudge {
+            fail: false,
+            priority: no_priority,
+        },
+    )
+    .unwrap();
+
+    assert!(!matches!(second.status, SweepStatus::Playable { .. }));
+    assert!(nbatv_db::tape_sources_for(&conn, GAME_ID)
+        .unwrap()
+        .is_empty());
+    assert!(nbatv_db::cache_entries_for(&conn, GAME_ID)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn sweep_demotes_an_explicitly_contradicted_candidate() {
     let conn = seeded_conn();
     let mut contradicted = confirmed_evidence();

@@ -20,6 +20,14 @@ use nbatv_catalog::{
 };
 use std::path::Path;
 
+fn terminal_field(value: &str) -> String {
+    value
+        .chars()
+        .take(512)
+        .flat_map(char::escape_default)
+        .collect()
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
     if argv.iter().any(|a| a == "--help" || a == "-h") {
@@ -104,7 +112,10 @@ fn run(
         for item in reviews.iter().take(20) {
             println!(
                 "  {} | {} | {} | {}",
-                item.game_id, item.rung_name, item.title, item.url_or_pointer
+                terminal_field(&item.game_id),
+                terminal_field(&item.rung_name),
+                terminal_field(&item.title),
+                terminal_field(&item.url_or_pointer)
             );
         }
     }
@@ -114,4 +125,15 @@ fn run(
     }
     let _ = EXIT_OK;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_field;
+
+    #[test]
+    fn terminal_field_escapes_controls_and_caps_metadata() {
+        assert_eq!(terminal_field("title\n\x1b[2J"), "title\\n\\u{1b}[2J");
+        assert_eq!(terminal_field(&"x".repeat(513)).len(), 512);
+    }
 }

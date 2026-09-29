@@ -309,6 +309,8 @@ pub fn sweep_game_with_judge(
                 },
             )?;
             break;
+        } else {
+            nbatv_db::invalidate_tape_source(conn, &game.game_id, rung)?;
         }
     }
     // Rungs never reached (early win) count as unconsumed — the win itself
@@ -382,7 +384,7 @@ pub fn review_list_all(conn: &Connection) -> SqlResult<Vec<ReviewItem>> {
 
 /// Maximum REVIEW items sent to the optional sidecar in one prioritization
 /// pass. Later items retain their deterministic order without unbounded calls.
-const MAX_REVIEW_PRIORITY_ITEMS: usize = 50;
+const MAX_REVIEW_PRIORITY_ITEMS: usize = 10;
 const REVIEW_EVIDENCE_CHARS: usize = 512;
 
 /// REVIEW candidates for one game, optionally prioritized in memory.

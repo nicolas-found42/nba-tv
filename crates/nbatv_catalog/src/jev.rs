@@ -14,7 +14,7 @@ use std::fmt;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const API_URL: &str = "https://api.typesafe.ai/v1/systemone";
 pub const MODEL: &str = "jev-1.13.0";
@@ -22,6 +22,9 @@ pub const OPENROUTER_API_URL: &str = "https://openrouter.ai/api/v1/chat/completi
 
 const OPENROUTER_SYSTEM_PROMPT: &str = "You are a strict typed decision engine. Return JSON only, with exactly this shape: {\"answers\":{\"decision\":<answer>}}. The answer must follow the supplied question schema and use only supplied closed-set values. Do not invent identifiers, URLs, or actions.";
 pub const DEFAULT_THRESHOLD: f64 = 0.75;
+const JEV_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_JEV_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_SHELL_COMMAND_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum JevError {
@@ -682,15 +685,23 @@ impl DirectHttpJev {
     }
 
     fn post_json(&self, body: &[u8]) -> Result<(u16, String), JevError> {
+        if body.len() > MAX_JEV_REQUEST_BYTES {
+            return Err(JevError::Transport(
+                "Jev request exceeded size limit".to_owned(),
+            ));
+        }
+        let deadline = Instant::now() + JEV_REQUEST_TIMEOUT;
         let request = render_jev_request(&self.endpoint, &self.api_key, body);
-        let mut stream = connect_tls(&self.endpoint, Arc::clone(&self.tls))?;
+        let mut stream = connect_tls(&self.endpoint, Arc::clone(&self.tls), deadline)?;
+        write_all_until(&mut stream, &request, deadline)?;
         stream
-            .write_all(&request)
-            .map_err(|error| JevError::Transport(format!("writing Jev request: {error}")))?;
+            .sock
+            .set_write_timeout(Some(deadline_remaining(deadline)?))
+            .map_err(|error| JevError::Transport(format!("setting Jev write timeout: {error}")))?;
         stream
             .flush()
             .map_err(|error| JevError::Transport(format!("flushing Jev request: {error}")))?;
-        let response = read_limited(&mut stream, 2 * 1024 * 1024)?;
+        let response = read_limited(&mut stream, 2 * 1024 * 1024, deadline)?;
         parse_http_response(&response)
     }
 }
@@ -819,44 +830,76 @@ fn rustls_client_config() -> Result<Arc<ClientConfig>, JevError> {
     Ok(Arc::new(config))
 }
 
+fn deadline_remaining(deadline: Instant) -> Result<Duration, JevError> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| JevError::Transport("Jev request deadline exceeded".to_owned()))
+}
+
 fn connect_tls(
     endpoint: &JevEndpoint,
     config: Arc<ClientConfig>,
+    deadline: Instant,
 ) -> Result<StreamOwned<ClientConnection, TcpStream>, JevError> {
     let addresses = (endpoint.host.as_str(), endpoint.port)
         .to_socket_addrs()
         .map_err(|error| JevError::Transport(format!("resolving Jev endpoint: {error}")))?;
     let mut last_error = None;
-    let socket = addresses
-        .into_iter()
-        .find_map(
-            |address| match TcpStream::connect_timeout(&address, Duration::from_secs(30)) {
-                Ok(socket) => Some(socket),
-                Err(error) => {
-                    last_error = Some(error);
-                    None
-                }
-            },
-        )
-        .ok_or_else(|| {
-            JevError::Transport(format!(
-                "connecting to Jev endpoint: {}",
-                last_error
-                    .map(|error| error.to_string())
-                    .unwrap_or_else(|| "no addresses".to_owned())
-            ))
-        })?;
+    let mut socket = None;
+    for address in addresses {
+        let timeout = deadline_remaining(deadline)?;
+        match TcpStream::connect_timeout(&address, timeout) {
+            Ok(connected) => {
+                socket = Some(connected);
+                break;
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    let socket = socket.ok_or_else(|| {
+        JevError::Transport(format!(
+            "connecting to Jev endpoint: {}",
+            last_error
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "no addresses".to_owned())
+        ))
+    })?;
+    let timeout = deadline_remaining(deadline)?;
     socket
-        .set_read_timeout(Some(Duration::from_secs(30)))
+        .set_read_timeout(Some(timeout))
         .map_err(|error| JevError::Transport(format!("setting Jev read timeout: {error}")))?;
     socket
-        .set_write_timeout(Some(Duration::from_secs(30)))
+        .set_write_timeout(Some(timeout))
         .map_err(|error| JevError::Transport(format!("setting Jev write timeout: {error}")))?;
     let server_name = ServerName::try_from(endpoint.host.clone())
         .map_err(|error| JevError::Transport(format!("invalid Jev TLS server name: {error}")))?;
     let connection = ClientConnection::new(config, server_name)
         .map_err(|error| JevError::Transport(format!("initializing Jev TLS: {error}")))?;
     Ok(StreamOwned::new(connection, socket))
+}
+
+fn write_all_until(
+    stream: &mut StreamOwned<ClientConnection, TcpStream>,
+    mut bytes: &[u8],
+    deadline: Instant,
+) -> Result<(), JevError> {
+    while !bytes.is_empty() {
+        stream
+            .sock
+            .set_write_timeout(Some(deadline_remaining(deadline)?))
+            .map_err(|error| JevError::Transport(format!("setting Jev write timeout: {error}")))?;
+        let written = stream
+            .write(bytes)
+            .map_err(|error| JevError::Transport(format!("writing Jev request: {error}")))?;
+        if written == 0 {
+            return Err(JevError::Transport(
+                "writing Jev request: write zero".to_owned(),
+            ));
+        }
+        bytes = &bytes[written..];
+    }
+    Ok(())
 }
 
 fn render_jev_request(endpoint: &JevEndpoint, api_key: &str, body: &[u8]) -> Vec<u8> {
@@ -875,10 +918,15 @@ fn render_jev_request(endpoint: &JevEndpoint, api_key: &str, body: &[u8]) -> Vec
 fn read_limited(
     stream: &mut StreamOwned<ClientConnection, TcpStream>,
     max_bytes: usize,
+    deadline: Instant,
 ) -> Result<Vec<u8>, JevError> {
     let mut response = Vec::new();
     let mut buffer = [0_u8; 8192];
     loop {
+        stream
+            .sock
+            .set_read_timeout(Some(deadline_remaining(deadline)?))
+            .map_err(|error| JevError::Transport(format!("setting Jev read timeout: {error}")))?;
         let read = stream
             .read(&mut buffer)
             .map_err(|error| JevError::Transport(format!("reading Jev response: {error}")))?;
@@ -1199,6 +1247,9 @@ impl JevJudge for DirectHttpJev {
     }
 
     fn route_shell_command(&self, command: &str) -> Result<Option<String>, JevError> {
+        if command.len() > MAX_SHELL_COMMAND_BYTES {
+            return Ok(None);
+        }
         let options = [
             "find_game",
             "open_season",
@@ -1258,6 +1309,14 @@ pub fn select_ia_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_jev_deadline_is_rejected() {
+        let expired = Instant::now() - Duration::from_millis(1);
+        assert!(
+            matches!(deadline_remaining(expired), Err(JevError::Transport(message)) if message == "Jev request deadline exceeded")
+        );
+    }
 
     #[test]
     fn all_ten_workflows_are_available_behind_disabled_judge() {

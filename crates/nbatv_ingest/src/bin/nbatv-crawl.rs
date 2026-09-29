@@ -165,7 +165,8 @@ fn parse_argv(argv: &[String]) -> Result<Args, String> {
 
 /// Live [`FetchClient`]: `curl -sS --fail-with-body -L` with the archive
 /// contact UA, page body on stdout, and the HTTP status appended via `-w`.
-/// `--fail-with-body` preserves 403/5xx evidence for typed classification.
+/// `--fail-with-body` preserves 403/5xx evidence; `--max-filesize` bounds
+/// the captured body before `Command::output()` buffers it.
 struct CurlClient {
     curl_bin: String,
     user_agent: String,
@@ -182,12 +183,16 @@ impl CurlClient {
     }
 }
 
+const CURL_MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+
 fn curl_command(curl_bin: &str, user_agent: &str, max_time_secs: u64, url: &str) -> Command {
     let mut command = Command::new(curl_bin);
     command
         .args(["-sS", "--fail-with-body", "-L"])
         .arg("--max-time")
         .arg(max_time_secs.to_string())
+        .arg("--max-filesize")
+        .arg(CURL_MAX_RESPONSE_BYTES.to_string())
         .arg("-A")
         .arg(user_agent)
         .arg("-o")
@@ -392,6 +397,12 @@ mod tests {
             .map(|arg| arg.to_string_lossy())
             .collect::<Vec<_>>();
         assert!(args.iter().any(|arg| arg == "--fail-with-body"), "{args:?}");
+        assert!(args.iter().any(|arg| arg == "--max-filesize"), "{args:?}");
+        assert!(
+            args.iter()
+                .any(|arg| arg == &CURL_MAX_RESPONSE_BYTES.to_string()),
+            "{args:?}"
+        );
         assert!(!args.iter().any(|arg| arg == "--fail"), "{args:?}");
     }
 
